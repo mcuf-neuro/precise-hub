@@ -29,7 +29,7 @@ Host VM
 │ └── precise-hub-fetch.service                            │
 │     └── fetch/run-fetch-loop.sh                          │
 │         (scan requests, assemble, transfer, log)         │
-└───────────────────────────────────────────────────────┘
+└──────────────────────────────────────────────────────────┘
 ```
 
 ## Script Layout
@@ -274,18 +274,6 @@ After changing configuration, restart the affected service:
 sudo systemctl restart precise-hub-deploy
 sudo systemctl restart precise-hub-fetch
 ```
-
-## Troubleshooting
-
-| Problem | Check |
-|---------|-------|
-| Mount fails on host | Verify credentials in `.env`, check network access, run `test-mounts.sh` |
-| WebDAV mount issues | Confirm `use_locks 0` in `/etc/davfs2/davfs2.conf` |
-| Archives not processed | Check filename format: `ORG_YYYY-MM-DD_NN.{tar.zst\|tar.gz\|zip}` |
-| Deploy not running | `systemctl status precise-hub-deploy`, check lock file: `cat /tmp/precise-deploy.lock` |
-| Fetch not running | `systemctl status precise-hub-fetch`, check lock file: `cat /tmp/precise-fetch.lock` |
-| Service won't start | `journalctl -u precise-hub-deploy -e` — look for mount or permission errors |
-| Large transfers freeze | Known WebDAV issue; see `FETCH_MAX_SIZE` limit; consider SFTP migration |
 
 ## Container Deployment (Alternative)
 
