@@ -21,6 +21,9 @@ TMP_PATH="${DATA_LAKE_PATH}/tmp"
 LOG_PATH="${DATA_LAKE_PATH}/logs"
 DATA_PATH="${DATA_LAKE_PATH}/Data"
 
+# Local staging area (on the hub VM, avoids network round-trips during processing)
+LOCAL_STAGING_PATH="/var/tmp/precise-hub"
+
 # Timing (in seconds)
 DEPLOY_LOOP_INTERVAL=10    # How often to check for new uploads (10s for testing)
 STABILITY_THRESHOLD=60     # File must be unchanged for this long (60s for testing)

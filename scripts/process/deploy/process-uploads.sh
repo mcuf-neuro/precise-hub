@@ -12,7 +12,7 @@ source "${PROCESS_DIR}/logging.sh"
 source "${PROCESS_DIR}/validation.sh"
 
 ensure_directories() {
-  mkdir -p "${TMP_PATH}"
+  mkdir -p "${LOCAL_STAGING_PATH}"
   mkdir -p "${LOG_PATH}"
 }
 
@@ -28,24 +28,24 @@ process_archive() {
     base_name="${base_name%.${ext}}"
   done
 
-  init_package_log "${filename}"
+  init_package_log "upload_${base_name}"
 
   log_json "\"action\": \"start_processing\", \"file\": \"${archive_file}\", \"source\": \"${source_label}\", \"size\": \"$(stat -c %s "$archive_file" 2>/dev/null || echo 0)\""
 
-  # Step 1: Copy archive from source (DEG/WebDAV) to data lake via rsync
-  local local_archive="${TMP_PATH}/${filename}"
-  log_info "Transferring archive to data lake: ${archive_file} -> ${local_archive}"
-  mkdir -p "${TMP_PATH}"
+  # Step 1: Copy archive from source (DEG/FS) to local hub staging
+  local local_archive="${LOCAL_STAGING_PATH}/${filename}"
+  log_info "Transferring archive to hub: ${archive_file} -> ${local_archive}"
+  mkdir -p "${LOCAL_STAGING_PATH}"
   if ! rsync -a "$archive_file" "$local_archive"; then
     log_error "rsync transfer failed: ${archive_file}"
     rm -f "$local_archive"
     finalize_package_log "failed_transfer"
     return 1
   fi
-  log_json "\"action\": \"transfer\", \"result\": \"success\", \"dest\": \"${local_archive}\""
+  log_json "\"action\": \"transfer_to_hub\", \"result\": \"success\", \"dest\": \"${local_archive}\""
 
-  # Step 2: Extract archive locally on the data lake volume
-  local staging_dir="${TMP_PATH}/${base_name}"
+  # Step 2: Extract archive locally on the hub
+  local staging_dir="${LOCAL_STAGING_PATH}/${base_name}"
   log_info "Staging to: ${staging_dir}"
 
   if [[ -d "$staging_dir" ]]; then
@@ -67,7 +67,7 @@ process_archive() {
   # Clean up the local archive copy (extracted content is in staging_dir)
   rm -f "$local_archive"
 
-  # Step 3: Process extracted examination folders (all local on data lake now)
+  # Step 3: Transfer extracted examination folders from hub to data lake
   local folders_stored=0
   local folders_skipped=0
   local folders_invalid=0
@@ -81,7 +81,7 @@ process_archive() {
 
     if ! [[ "$exam_name" =~ ^[A-Z]{3}_[0-9]{5}$ ]]; then
       log_warn "Skipping invalid folder name: ${exam_name} (expected: ORG_NNNNN, e.g., UKF_00123)"
-      log_json "\"action\": \"move_exam_folder\", \"folder\": \"${exam_name}\", \"result\": \"invalid_name\""
+      log_json "\"action\": \"store_exam_folder\", \"folder\": \"${exam_name}\", \"result\": \"invalid_name\""
       ((folders_invalid++))
       continue
     fi
@@ -102,15 +102,19 @@ process_archive() {
 
     if [[ -d "$dest_folder" ]]; then
       log_warn "Destination folder already exists, skipping: ${dest_folder}"
-      log_json "\"action\": \"move_exam_folder\", \"folder\": \"${exam_name}\", \"result\": \"skipped_existing\""
+      log_json "\"action\": \"store_exam_folder\", \"folder\": \"${exam_name}\", \"result\": \"skipped_existing\""
       ((folders_skipped++))
       continue
     fi
 
-    # mv is safe here: both source and dest are on the same CIFS mount (data lake)
+    # rsync from local hub staging to data lake
     mkdir -p "$dest_shard_path"
-    mv "$exam_folder" "$dest_folder"
-    log_json "\"action\": \"move_exam_folder\", \"folder\": \"${exam_name}\", \"shard\": \"${shard_dir}\", \"result\": \"stored\""
+    if ! rsync -a "$exam_folder" "$dest_shard_path/"; then
+      log_error "rsync to data lake failed: ${exam_name}"
+      log_json "\"action\": \"store_exam_folder\", \"folder\": \"${exam_name}\", \"result\": \"failed_transfer\""
+      continue
+    fi
+    log_json "\"action\": \"store_exam_folder\", \"folder\": \"${exam_name}\", \"shard\": \"${shard_dir}\", \"result\": \"stored\""
     ((folders_stored++))
   done
 

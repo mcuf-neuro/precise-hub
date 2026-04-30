@@ -39,7 +39,14 @@ log_info "Loop interval: ${FETCH_LOOP_INTERVAL} seconds"
 log_info "Max package size: ${FETCH_MAX_SIZE}"
 log_info "Download expiry: ${FETCH_EXPIRY_DAYS} days"
 log_info "Organizations: ${ORGANIZATIONS}"
+log_info "Local staging: ${LOCAL_STAGING_PATH}"
 log_info "Press Ctrl+C to stop"
+
+# Clean up leftover staging files from previous runs (e.g. after crash)
+if [[ -d "${LOCAL_STAGING_PATH}" ]] && ls "${LOCAL_STAGING_PATH}"/* &>/dev/null; then
+  log_warn "Cleaning up leftover staging files in ${LOCAL_STAGING_PATH}"
+  rm -rf "${LOCAL_STAGING_PATH:?}"/*
+fi
 
 # Main loop
 while true; do

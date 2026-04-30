@@ -18,7 +18,7 @@ PACKAGE_LOG_FILE=""
 init_package_log() {
   local package_name="$1"
   local timestamp=$(date -u +"%Y-%m-%dT%H-%M-%SZ")
-  PACKAGE_LOG_FILE="${LOG_PATH}/${timestamp}__${package_name}.log"
+  PACKAGE_LOG_FILE="${LOG_PATH}/${timestamp}__${package_name}.json.log"
   mkdir -p "${LOG_PATH}"
   echo "{ \"log_start\": \"${timestamp}\", \"package\": \"${package_name}\" }" >> "${PACKAGE_LOG_FILE}"
 }

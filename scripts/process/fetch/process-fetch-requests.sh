@@ -12,7 +12,7 @@ source "${PROCESS_DIR}/logging.sh"
 source "${PROCESS_DIR}/validation.sh"
 
 ensure_directories() {
-  mkdir -p "${TMP_PATH}"
+  mkdir -p "${LOCAL_STAGING_PATH}"
   mkdir -p "${LOG_PATH}"
 }
 
@@ -35,7 +35,7 @@ process_request() {
   local org="$2"
   local filename=$(basename "$request_file")
 
-  init_package_log "fetch_${filename}"
+  init_package_log "fetch_${filename%.json}"
 
   log_json "\"action\": \"start_fetch\", \"file\": \"${request_file}\", \"org\": \"${org}\""
 
@@ -166,11 +166,11 @@ process_request() {
 
   log_json "\"action\": \"validate_request\", \"file\": \"${filename}\", \"org\": \"${req_org}\", \"ids\": \"${ids_str}\", \"skipped\": \"${missing_str}\", \"result\": \"valid\", \"ack\": \"written\""
 
-  # Step 2: Assemble package
+  # Step 2: Assemble package on local hub staging
   local base_name="${filename%.json}"
   local archive_name="${org}_fetch_${base_name#request_}.tar.zst"
-  local staging_dir="${TMP_PATH}/fetch_${base_name}"
-  local archive_path="${TMP_PATH}/${archive_name}"
+  local staging_dir="${LOCAL_STAGING_PATH}/fetch_${base_name}"
+  local archive_path="${LOCAL_STAGING_PATH}/${archive_name}"
 
   mkdir -p "$staging_dir"
 
@@ -179,10 +179,15 @@ process_request() {
     local shard_dir
     shard_dir=$(get_shard_dir "$exam_id")
     local src="${DATA_PATH}/${exam_org}/${shard_dir}/${exam_id}"
-    cp -a "$src" "$staging_dir/"
+    if ! rsync -a "$src" "$staging_dir/"; then
+      log_error "rsync from data lake failed: ${exam_id}"
+      rm -rf "$staging_dir"
+      finalize_package_log "failed_transfer"
+      return 1
+    fi
   done
 
-  # Create archive
+  # Create archive locally on hub
   tar -cf "$archive_path" --use-compress-program=zstd -C "$staging_dir" .
   rm -rf "$staging_dir"
 
@@ -210,7 +215,7 @@ process_request() {
   fi
 
   # Generate checksum (format: "hash  filename" for sha256sum -c compatibility)
-  (cd "$TMP_PATH" && sha256sum "$archive_name") > "${archive_path}.sha256"
+  (cd "$LOCAL_STAGING_PATH" && sha256sum "$archive_name") > "${archive_path}.sha256"
 
   local human_size
   human_size=$(numfmt --to=iec "$archive_size")
@@ -253,11 +258,12 @@ process_request() {
   local archive_dir="${DEG_PATH}/${org}/archived-requests"
   local archive_ts
   archive_ts=$(date -u +"%Y-%m-%dT%H-%M-%SZ")
+  local archived_name="${archive_ts}__${filename}"
   mkdir -p "$archive_dir"
-  mv "$request_file" "${archive_dir}/${archive_ts}__${filename}"
+  mv "$request_file" "${archive_dir}/${archived_name}"
 
   # Copy request to data lake logs (hub-side audit)
-  cp "${archive_dir}/${filename}" "${LOG_PATH}/"
+  cp "${archive_dir}/${archived_name}" "${LOG_PATH}/"
 
   log_json "\"action\": \"notify_and_archive\", \"file\": \"${filename}\", \"result\": \"success\", \"message\": \"ready\", \"archived_to\": \"${archive_dir}\""
 

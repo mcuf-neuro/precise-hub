@@ -1,6 +1,6 @@
 # PRECISE Hub
 
-Data management hub for the PRECISE consortium. Runs on an Ubuntu VM, orchestrated via systemd.
+Data management hub for the PRECISE consortium. Runs on a mainstream GNU/Linux system with systemd.
 
 The hub connects three storage systems:
 - **Data Exchange Gateway (DEG)** — WebDAV server in the DMZ where external partners upload and download data packages
@@ -49,7 +49,7 @@ scripts/process/
 
 ## Prerequisites
 
-- Ubuntu VM
+- Mainstream GNU/Linux distro with systemd
 - Mount tools: `sudo apt install cifs-utils davfs2`
 - Runtime dependencies: `sudo apt install -y jq zstd rsync unzip zip`
 - Network access to all three storage servers
@@ -206,8 +206,8 @@ The source is recorded in every log entry (`"source": "deg"` or `"source": "fors
 **Processing steps:**
 1. Discover archive files matching `ORG_YYYY-MM-DD_NN.{tar.zst|tar.gz|zip}`
 2. Validate via SHA-256 checksum (if `.sha256` file exists) or file stability check
-3. Transfer archive to data lake staging area (`/mnt/data-lake/tmp/`)
-4. Extract and move exam folders (`ORG_NNNNN`) to sharded location (`/mnt/data-lake/Data/{ORG}/{shard}/`)
+3. Transfer archive to local hub staging area (`/var/tmp/precise-hub/`)
+4. Extract locally, then rsync exam folders (`ORG_NNNNN`) to sharded location (`/mnt/data-lake/Data/{ORG}/{shard}/`)
 5. Delete the source archive from the DEG
 6. Write JSON log to `/mnt/data-lake/logs/`
 
@@ -221,7 +221,7 @@ The fetch loop runs continuously (default: every 30 seconds) and scans for new J
 **Processing steps:**
 1. Discover `.json` request files
 2. Parse, validate (known org, valid ID format, IDs exist in data lake), write "received" message to `[ORG]/messages/`
-3. Assemble archive from data lake exam folders, generate checksum
+3. Rsync exam folders from data lake to local hub staging, assemble archive + checksum
 4. Transfer archive + checksum to `[ORG]/download/` on the DEG
 5. Write "ready" message to `[ORG]/messages/`, archive request file to `[ORG]/archived-requests/`
 6. Write JSON log to `/mnt/data-lake/logs/`
@@ -250,7 +250,6 @@ The fetch loop runs continuously (default: every 30 seconds) and scans for new J
 │   │   └── ...
 │   ├── UKK/
 │   └── ...
-├── tmp/                     # temporary staging during processing
 └── logs/                    # JSON processing logs
 ```
 
@@ -267,6 +266,7 @@ Edit `scripts/process/config.sh` to adjust processing parameters:
 | `STABILITY_THRESHOLD` | `60` | Seconds a file must be unchanged before processing (when no checksum) |
 | `FETCH_MAX_SIZE` | `20G` | Maximum size of a single fetch download package |
 | `FETCH_EXPIRY_DAYS` | `2` | Days after which download packages are auto-deleted |
+| `LOCAL_STAGING_PATH` | `/var/tmp/precise-hub` | Local hub directory for staging (extraction, archive assembly) |
 | `SHARD_SIZE` | `100` | Exam folders per shard directory |
 
 After changing configuration, restart the affected service:
