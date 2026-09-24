@@ -103,3 +103,16 @@ The checksum file must contain the SHA-256 hash as the first field:
 ```
 a1b2c3d4e5f6...  UKF_2025-12-15_00.tar.zst
 ```
+
+Upload the archive first and the checksum file last: the checksum file tells the hub that the upload is complete.
+
+## What Happens Next
+
+The hub writes a status message to your `messages/` folder for every processed package (see the [Fetch Guide](user-guide-fetch.md#checking-status-messages) for the message format):
+
+- `stored` — the package was processed. `stored_ids` lists the stored examinations, `skipped_existing_ids` those that were already in the data lake (existing examinations are never overwritten). The archive and its checksum file are removed from `upload/`.
+- `rejected` — the package was not accepted. The `error` field explains why:
+  - **Checksum mismatch:** the checksum file is renamed to `NAME.sha256.mismatch` and the archive is kept. Upload a correct `.sha256` file to retry, or re-upload both files.
+  - **Invalid file name, corrupt archive, or no `ORG_NNNNN` folders at the top level:** the files are renamed to `NAME.rejected`. Fix the package and upload it again under its proper name.
+
+Rejected files are deleted from `upload/` automatically after 48 hours.

@@ -10,10 +10,84 @@ PROCESS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${PROCESS_DIR}/config.sh"
 source "${PROCESS_DIR}/logging.sh"
 source "${PROCESS_DIR}/validation.sh"
+source "${PROCESS_DIR}/messages.sh"
 
 ensure_directories() {
-  mkdir -p "${LOCAL_STAGING_PATH}"
+  mkdir -p "${DEPLOY_STAGING_PATH}"
+  mkdir -p "${STATE_PATH}/checksum-failed"
   mkdir -p "${LOG_PATH}"
+}
+
+# Strip any supported archive extension from a file name
+strip_archive_ext() {
+  local name="$1"
+  for ext in ${ARCHIVE_EXTENSIONS}; do
+    name="${name%.${ext}}"
+  done
+  echo "$name"
+}
+
+# JSON array from a bash array (empty array if no elements)
+json_array() {
+  if [[ $# -eq 0 ]]; then
+    echo "[]"
+  else
+    printf '%s\n' "$@" | jq -R . | jq -sc .
+  fi
+}
+
+# Reject an upload permanently: rename archive (+ checksum) so it drops out of the
+# scan, notify the partner. The DEG cleanup removes rejected files later.
+reject_upload() {
+  local archive_file="$1"
+  local org="$2"
+  local source_label="$3"
+  local reason="$4"
+  local details_json="${5:-[]}"
+  local filename
+  filename=$(basename "$archive_file")
+
+  mv -f "$archive_file" "${archive_file}.rejected"
+  if [[ -f "${archive_file}.sha256" ]]; then
+    mv -f "${archive_file}.sha256" "${archive_file}.sha256.rejected"
+  fi
+
+  log_error "Rejected upload ${filename}: ${reason}"
+  log_json "\"action\": \"reject_upload\", \"file\": \"${filename}\", \"source\": \"${source_label}\", \"reason\": \"${reason}\", \"details\": ${details_json}"
+
+  write_message "$org" "$(jq -n \
+    --arg file "$filename" \
+    --arg source "$source_label" \
+    --arg reason "$reason" \
+    --argjson details "$details_json" \
+    --arg ts "$(now_iso)" \
+    '{type: "upload", status: "rejected", file: $file, source: $source, error: $reason, details: $details, timestamp: $ts}')" \
+    "upload" "rejected" "$(strip_archive_ext "$filename")"
+}
+
+# Checksum mismatch on a stable (finished) upload: rename the checksum file to
+# NAME.sha256.mismatch, so the archive is skipped until the partner uploads a new
+# checksum file (or the cleanup removes it). The archive itself is kept, so a wrong
+# checksum file can be fixed without re-uploading the archive.
+mark_checksum_mismatch() {
+  local archive_file="$1"
+  local org="$2"
+  local source_label="$3"
+  local filename
+  filename=$(basename "$archive_file")
+
+  mv -f "${archive_file}.sha256" "${archive_file}.sha256.mismatch"
+  rm -f "${STATE_PATH}/checksum-failed/${filename}"
+
+  log_error "Checksum mismatch on finished upload, marked: ${filename}"
+  log_json "\"action\": \"checksum_verify\", \"file\": \"${filename}\", \"source\": \"${source_label}\", \"result\": \"mismatch_marked\""
+
+  write_message "$org" "$(jq -n \
+    --arg file "$filename" \
+    --arg source "$source_label" \
+    --arg ts "$(now_iso)" \
+    '{type: "upload", status: "rejected", file: $file, source: $source, error: "SHA-256 checksum mismatch. The archive was kept; upload a correct .sha256 file to retry, or re-upload both files.", timestamp: $ts}')" \
+    "upload" "rejected" "$(strip_archive_ext "$filename")"
 }
 
 # Process a single archive file
@@ -21,21 +95,19 @@ process_archive() {
   local archive_file="$1"
   local org="$2"
   local source_label="$3"
-  local filename=$(basename "$archive_file")
-
-  local base_name="${filename}"
-  for ext in ${ARCHIVE_EXTENSIONS}; do
-    base_name="${base_name%.${ext}}"
-  done
+  local filename
+  filename=$(basename "$archive_file")
+  local base_name
+  base_name=$(strip_archive_ext "$filename")
 
   init_package_log "upload_${base_name}"
 
   log_json "\"action\": \"start_processing\", \"file\": \"${archive_file}\", \"source\": \"${source_label}\", \"size\": \"$(stat -c %s "$archive_file" 2>/dev/null || echo 0)\""
 
   # Step 1: Copy archive from source (DEG/FS) to local hub staging
-  local local_archive="${LOCAL_STAGING_PATH}/${filename}"
+  local local_archive="${DEPLOY_STAGING_PATH}/${filename}"
   log_info "Transferring archive to hub: ${archive_file} -> ${local_archive}"
-  mkdir -p "${LOCAL_STAGING_PATH}"
+  mkdir -p "${DEPLOY_STAGING_PATH}"
   if ! rsync -a "$archive_file" "$local_archive"; then
     log_error "rsync transfer failed: ${archive_file}"
     rm -f "$local_archive"
@@ -45,7 +117,7 @@ process_archive() {
   log_json "\"action\": \"transfer_to_hub\", \"result\": \"success\", \"dest\": \"${local_archive}\""
 
   # Step 2: Extract archive locally on the hub
-  local staging_dir="${LOCAL_STAGING_PATH}/${base_name}"
+  local staging_dir="${DEPLOY_STAGING_PATH}/${base_name}"
   log_info "Staging to: ${staging_dir}"
 
   if [[ -d "$staging_dir" ]]; then
@@ -59,6 +131,7 @@ process_archive() {
     log_error "Extraction failed: ${local_archive}"
     rm -rf "$staging_dir"
     rm -f "$local_archive"
+    reject_upload "$archive_file" "$org" "$source_label" "Archive could not be extracted (corrupt or unsupported format)"
     finalize_package_log "failed_extraction"
     return 1
   fi
@@ -68,21 +141,20 @@ process_archive() {
   rm -f "$local_archive"
 
   # Step 3: Transfer extracted examination folders from hub to data lake
-  local folders_stored=0
-  local folders_skipped=0
-  local folders_invalid=0
+  local stored=() skipped=() invalid=() failed=()
 
   for exam_folder in "${staging_dir}"/*; do
     if [[ ! -d "$exam_folder" ]]; then
       continue
     fi
 
-    local exam_name=$(basename "$exam_folder")
+    local exam_name
+    exam_name=$(basename "$exam_folder")
 
     if ! [[ "$exam_name" =~ ^[A-Z]{3}_[0-9]{5}$ ]]; then
       log_warn "Skipping invalid folder name: ${exam_name} (expected: ORG_NNNNN, e.g., UKF_00123)"
       log_json "\"action\": \"store_exam_folder\", \"folder\": \"${exam_name}\", \"result\": \"invalid_name\""
-      ((folders_invalid++))
+      invalid+=("$exam_name")
       continue
     fi
 
@@ -90,50 +162,112 @@ process_archive() {
     local folder_org="${exam_name:0:3}"
 
     # Calculate shard directory
-    local shard_dir=$(get_shard_dir "$exam_name")
+    local shard_dir
+    shard_dir=$(get_shard_dir "$exam_name") || true
     if [[ -z "$shard_dir" ]]; then
       log_warn "Could not calculate shard for: ${exam_name}"
-      ((folders_invalid++))
+      invalid+=("$exam_name")
       continue
     fi
 
     local dest_shard_path="${DATA_PATH}/${folder_org}/${shard_dir}"
     local dest_folder="${dest_shard_path}/${exam_name}"
+    local partial_folder="${dest_shard_path}/.partial_${exam_name}"
 
     if [[ -d "$dest_folder" ]]; then
       log_warn "Destination folder already exists, skipping: ${dest_folder}"
       log_json "\"action\": \"store_exam_folder\", \"folder\": \"${exam_name}\", \"result\": \"skipped_existing\""
-      ((folders_skipped++))
+      skipped+=("$exam_name")
       continue
     fi
 
-    # rsync from local hub staging to data lake
+    # rsync into a hidden partial folder, then rename atomically. An interrupted
+    # transfer never leaves a half-filled folder under the final name.
     mkdir -p "$dest_shard_path"
-    if ! rsync -a "$exam_folder" "$dest_shard_path/"; then
+    rm -rf "$partial_folder"
+    if ! rsync -a "${exam_folder}/" "${partial_folder}/" || ! mv "$partial_folder" "$dest_folder"; then
       log_error "rsync to data lake failed: ${exam_name}"
       log_json "\"action\": \"store_exam_folder\", \"folder\": \"${exam_name}\", \"result\": \"failed_transfer\""
+      rm -rf "$partial_folder"
+      failed+=("$exam_name")
       continue
     fi
     log_json "\"action\": \"store_exam_folder\", \"folder\": \"${exam_name}\", \"shard\": \"${shard_dir}\", \"result\": \"stored\""
-    ((folders_stored++))
+    stored+=("$exam_name")
   done
 
-  log_info "Processing complete: ${folders_stored} stored, ${folders_skipped} skipped (existing), ${folders_invalid} invalid"
+  log_info "Processing complete: ${#stored[@]} stored, ${#skipped[@]} skipped (existing), ${#invalid[@]} invalid, ${#failed[@]} failed"
 
   # Step 4: Clean up staging directory
   rm -rf "$staging_dir"
 
-  # Step 5: Delete the source archive from DEG (data is now in the data lake)
+  local stored_json skipped_json invalid_json failed_json
+  stored_json=$(json_array "${stored[@]}")
+  skipped_json=$(json_array "${skipped[@]}")
+  invalid_json=$(json_array "${invalid[@]}")
+  failed_json=$(json_array "${failed[@]}")
+
+  # Step 5a: Transfer to the data lake failed for some folder: keep the source
+  # archive on the DEG so the next cycle retries (already stored folders are then
+  # skipped as existing). Never delete a source whose content is not safely stored.
+  if [[ ${#failed[@]} -gt 0 ]]; then
+    log_error "Keeping source archive for retry, ${#failed[@]} folder(s) failed: ${filename}"
+    log_json "\"action\": \"cleanup_source\", \"file\": \"${filename}\", \"result\": \"kept_for_retry\", \"failed\": ${failed_json}"
+    finalize_package_log "failed_store"
+    return 1
+  fi
+
+  # Step 5b: Nothing usable inside: reject so the partner is told and the file is
+  # not silently discarded.
+  if [[ ${#stored[@]} -eq 0 && ${#skipped[@]} -eq 0 ]]; then
+    reject_upload "$archive_file" "$org" "$source_label" \
+      "No examination folders (ORG_NNNNN) found at the top level of the archive" "$invalid_json"
+    finalize_package_log "rejected_empty"
+    return 1
+  fi
+
+  # Step 5c: Delete the source archive from DEG (data is now in the data lake)
   rm -f "$archive_file"
   local checksum_file="${archive_file}.sha256"
   if [[ -f "$checksum_file" ]]; then
     rm -f "$checksum_file"
   fi
 
-  log_json "\"action\": \"cleanup_source\", \"file\": \"${filename}\""
+  log_json "\"action\": \"cleanup_source\", \"file\": \"${filename}\", \"result\": \"deleted\""
+
+  write_message "$org" "$(jq -n \
+    --arg file "$filename" \
+    --arg source "$source_label" \
+    --argjson stored "$stored_json" \
+    --argjson skipped "$skipped_json" \
+    --argjson invalid "$invalid_json" \
+    --arg ts "$(now_iso)" \
+    '{type: "upload", status: "stored", file: $file, source: $source, stored_ids: $stored, skipped_existing_ids: $skipped, invalid_folders: $invalid, timestamp: $ts}')" \
+    "upload" "stored" "$base_name"
 
   finalize_package_log "success"
   return 0
+}
+
+# Verify checksum, but avoid re-hashing a still-growing file every cycle: remember
+# size+mtime of the last failed attempt and skip while they are unchanged.
+checksum_ok_or_wait() {
+  local archive_file="$1"
+  local filename
+  filename=$(basename "$archive_file")
+  local state_file="${STATE_PATH}/checksum-failed/${filename}"
+  local sig
+  sig=$(stat -c '%s %Y' "$archive_file" 2>/dev/null || echo "")
+
+  if [[ -f "$state_file" ]] && [[ "$(cat "$state_file")" == "$sig" ]]; then
+    return 1
+  fi
+  if verify_checksum "$archive_file"; then
+    rm -f "$state_file"
+    return 0
+  fi
+  echo "$sig" > "$state_file"
+  return 1
 }
 
 # Scan a single upload source path for archives of a given organization
@@ -154,16 +288,18 @@ process_org_source() {
         continue
       fi
 
-      local filename=$(basename "$archive_file")
-
-      local base_check="${filename}"
-      for check_ext in ${ARCHIVE_EXTENSIONS}; do
-        base_check="${base_check%.${check_ext}}"
-      done
+      local filename
+      filename=$(basename "$archive_file")
+      local base_check
+      base_check=$(strip_archive_ext "$filename")
 
       if ! [[ "$base_check" =~ ^[A-Z]{3}_[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}$ ]]; then
-        log_warn "Skipping file with invalid name format: ${filename} (expected: ORG_YYYY-MM-DD_NN.ext)"
-        log_json "\"action\": \"filename_validation\", \"file\": \"${filename}\", \"source\": \"${source_label}\", \"result\": \"invalid_format\""
+        if is_file_stable "$archive_file"; then
+          reject_upload "$archive_file" "$org" "$source_label" \
+            "Invalid file name: ${filename} (expected: ORG_YYYY-MM-DD_NN.tar.zst)"
+        else
+          log_debug "Invalid name, still uploading: ${filename}"
+        fi
         continue
       fi
 
@@ -171,19 +307,26 @@ process_org_source() {
 
       # Branch 1: Checksum file exists
       if [[ -f "$checksum_file" ]]; then
-        log_info "Found archive with checksum: ${filename} (${source_label})"
-
-        if verify_checksum "$archive_file"; then
+        if checksum_ok_or_wait "$archive_file"; then
+          log_info "Found archive with valid checksum: ${filename} (${source_label})"
           log_json "\"action\": \"checksum_verify\", \"file\": \"${filename}\", \"source\": \"${source_label}\", \"result\": \"pass\""
+          rm -f "${archive_file}.sha256.mismatch"
           process_archive "$archive_file" "$org" "$source_label" || true
+        elif is_file_stable "$archive_file"; then
+          mark_checksum_mismatch "$archive_file" "$org" "$source_label"
         else
-          log_error "Checksum verification failed: ${filename}"
-          log_json "\"action\": \"checksum_verify\", \"file\": \"${filename}\", \"source\": \"${source_label}\", \"result\": \"fail\""
+          log_debug "Checksum does not match yet, archive still uploading: ${filename}"
         fi
         continue
       fi
 
-      # Branch 2: No checksum - check file stability
+      # Branch 2: Earlier checksum mismatch, waiting for a new checksum file
+      if [[ -f "${archive_file}.sha256.mismatch" ]]; then
+        log_debug "Skipping archive with checksum mismatch marker: ${filename}"
+        continue
+      fi
+
+      # Branch 3: No checksum - check file stability
       if is_file_stable "$archive_file"; then
         log_info "Found stable archive (no checksum): ${filename} (${source_label})"
         log_json "\"action\": \"stability_check\", \"file\": \"${filename}\", \"source\": \"${source_label}\", \"result\": \"stable\""
@@ -202,7 +345,8 @@ run_processing_cycle() {
 
   for source_base in ${UPLOAD_SOURCES}; do
     # Derive a human-readable label from the mount path
-    local source_label=$(basename "$source_base")
+    local source_label
+    source_label=$(basename "$source_base")
 
     for org in ${ORGANIZATIONS}; do
       process_org_source "$org" "$source_base" "$source_label"

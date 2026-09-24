@@ -106,11 +106,19 @@ The hub writes JSON messages to your `messages/` folder. Check this folder for u
 | `received` | Hub has received and is processing your request |
 | `ready` | Package is assembled and available in `download/` |
 | `error` | Something went wrong — see the `error` field for details |
-| `expired` | Download package was auto-deleted (default: after 2 days) |
+| `expired` | Download package was auto-deleted (default: after 48 hours) |
+
+Upload results are reported in the same folder with `type: "upload"`:
+
+| Message `status` | Meaning |
+|-------------------|---------|
+| `stored` | Package processed; `stored_ids` lists the stored examinations, `skipped_existing_ids` those that already existed |
+| `rejected` | Package not accepted — see the `error` field (invalid name, corrupt archive, checksum mismatch, no examination folders) |
 
 ## Important Notes
 
-- **Download expiry:** Packages in `download/` are automatically deleted after 2 days. Download promptly after receiving a "ready" notification.
+- **Download expiry:** Packages in `download/` are automatically deleted after 48 hours. Download promptly after receiving a "ready" notification.
+- **Failed requests:** A request that could not be fulfilled is moved to `archived-requests/` with a `FAILED` marker in its name, together with an error message in `messages/`. To retry, submit a new request file.
 - **Size limit:** Requests that would produce a package larger than 20 GB are rejected with an error message.
 - **One request per file:** Each JSON file should contain one request. For multiple independent requests, create separate files (`request_2026-04-16_00.json`, `request_2026-04-16_01.json`, …).
 - **Examination IDs:** IDs follow the format `ORG_NNNNN` (3-letter org code + underscore + 5-digit number). You need to know the exact IDs you want to request.

@@ -39,6 +39,7 @@ scripts/process/
 ├── config.sh              # shared configuration
 ├── logging.sh             # shared JSON logging functions
 ├── validation.sh          # shared validation functions
+├── messages.sh            # shared partner-visible status messages
 ├── deploy/
 │   ├── run-deploy-loop.sh         # deploy processing loop
 │   └── process-uploads.sh         # upload processing logic
@@ -206,10 +207,12 @@ The source is recorded in every log entry (`"source": "deg"` or `"source": "fors
 **Processing steps:**
 1. Discover archive files matching `ORG_YYYY-MM-DD_NN.{tar.zst|tar.gz|zip}`
 2. Validate via SHA-256 checksum (if `.sha256` file exists) or file stability check
-3. Transfer archive to local hub staging area (`/var/tmp/precise-hub/`)
-4. Extract locally, then rsync exam folders (`ORG_NNNNN`) to sharded location (`/mnt/data-lake/Data/{ORG}/{shard}/`)
-5. Delete the source archive from the DEG
-6. Write JSON log to `/mnt/data-lake/logs/`
+3. Transfer archive to local hub staging area (`/var/tmp/precise-hub/deploy/`)
+4. Extract locally, then rsync exam folders (`ORG_NNNNN`) to sharded location (`/mnt/data-lake/Data/{ORG}/{shard}/`). Each folder is written to a hidden `.partial_*` name first and renamed on completion, so an interrupted transfer never leaves a half-filled folder.
+5. Delete the source archive from the DEG (only if every folder was stored or already existed; otherwise the archive is kept and retried next cycle)
+6. Write an `upload` message to `[ORG]/messages/` and a JSON log to `/mnt/data-lake/logs/`
+
+**Rejected uploads:** an archive with an invalid name, a corrupt archive, or one without `ORG_NNNNN` folders at the top level is renamed to `NAME.rejected` (checksum to `NAME.sha256.rejected`) and an error message is written. A finished upload whose checksum does not match gets its checksum file renamed to `NAME.sha256.mismatch`; the archive is kept and skipped until a new `.sha256` file arrives. A mismatch is only declared once the archive has been stable for `STABILITY_THRESHOLD` seconds, so a checksum uploaded before the archive is complete just waits.
 
 ### Fetch Pipeline (Requests)
 
@@ -221,12 +224,14 @@ The fetch loop runs continuously (default: every 30 seconds) and scans for new J
 **Processing steps:**
 1. Discover `.json` request files
 2. Parse, validate (known org, valid ID format, IDs exist in data lake), write "received" message to `[ORG]/messages/`
-3. Rsync exam folders from data lake to local hub staging, assemble archive + checksum
+3. Rsync exam folders from data lake to local hub staging (`/var/tmp/precise-hub/fetch/`), assemble archive + checksum
 4. Transfer archive + checksum to `[ORG]/download/` on the DEG
 5. Write "ready" message to `[ORG]/messages/`, archive request file to `[ORG]/archived-requests/`
 6. Write JSON log to `/mnt/data-lake/logs/`
 
-**Automatic cleanup:** Downloads older than `FETCH_EXPIRY_DAYS` are auto-deleted from `[ORG]/download/`.
+Failed requests (invalid JSON, unknown organization, no IDs found, transfer errors) are archived too, as `<timestamp>__FAILED__<request>.json`, after the error message has been written. A request is therefore never processed twice; to retry, the partner submits a new request file.
+
+**Automatic cleanup:** Downloads older than `DOWNLOAD_EXPIRY_HOURS` are auto-deleted from `[ORG]/download/`.
 
 ### DEG Folder Layout (per Organization)
 
@@ -255,7 +260,7 @@ The fetch loop runs continuously (default: every 30 seconds) and scans for new J
 
 ## Configuration
 
-Edit `scripts/process/config.sh` to adjust processing parameters:
+Edit `scripts/process/config.sh` to adjust processing parameters. The mount points, `LOCAL_STAGING_PATH` and the lock file paths can also be overridden through environment variables of the same name, which allows running the scripts against local test directories.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -265,8 +270,8 @@ Edit `scripts/process/config.sh` to adjust processing parameters:
 | `FETCH_LOOP_INTERVAL` | `30` | Seconds between fetch processing cycles |
 | `STABILITY_THRESHOLD` | `60` | Seconds a file must be unchanged before processing (when no checksum) |
 | `FETCH_MAX_SIZE` | `20G` | Maximum size of a single fetch download package |
-| `FETCH_EXPIRY_DAYS` | `2` | Days after which download packages are auto-deleted |
-| `LOCAL_STAGING_PATH` | `/var/tmp/precise-hub` | Local hub directory for staging (extraction, archive assembly) |
+| `DOWNLOAD_EXPIRY_HOURS` | `48` | Hours after which download packages are auto-deleted |
+| `LOCAL_STAGING_PATH` | `/var/tmp/precise-hub` | Local hub directory for staging; `deploy/` and `fetch/` subdirectories, one per loop |
 | `SHARD_SIZE` | `100` | Exam folders per shard directory |
 
 After changing configuration, restart the affected service:

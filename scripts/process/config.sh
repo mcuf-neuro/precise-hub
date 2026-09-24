@@ -6,10 +6,10 @@
 # Organization codes (3-letter uppercase)
 ORGANIZATIONS="UKK MUV UKF UHD MUI UKE FAU"
 
-# Mount points
-DEG_PATH="/mnt/deg"
-FORSCHUNGSSPEICHER_PATH="/mnt/forschungsspeicher"
-DATA_LAKE_PATH="/mnt/data-lake"
+# Mount points (override via environment for testing, e.g. DEG_PATH=/tmp/deg)
+DEG_PATH="${DEG_PATH:-/mnt/deg}"
+FORSCHUNGSSPEICHER_PATH="${FORSCHUNGSSPEICHER_PATH:-/mnt/forschungsspeicher}"
+DATA_LAKE_PATH="${DATA_LAKE_PATH:-/mnt/data-lake}"
 
 # Upload sources: the processor scans these paths for ORG/upload/ folders.
 # DEG: external partners (all organizations)
@@ -21,8 +21,12 @@ TMP_PATH="${DATA_LAKE_PATH}/tmp"
 LOG_PATH="${DATA_LAKE_PATH}/logs"
 DATA_PATH="${DATA_LAKE_PATH}/Data"
 
-# Local staging area (on the hub VM, avoids network round-trips during processing)
-LOCAL_STAGING_PATH="/var/tmp/precise-hub"
+# Local staging area (on the hub VM, avoids network round-trips during processing).
+# Each loop owns a subdirectory and only ever cleans its own.
+LOCAL_STAGING_PATH="${LOCAL_STAGING_PATH:-/var/tmp/precise-hub}"
+DEPLOY_STAGING_PATH="${LOCAL_STAGING_PATH}/deploy"
+FETCH_STAGING_PATH="${LOCAL_STAGING_PATH}/fetch"
+STATE_PATH="${LOCAL_STAGING_PATH}/state"   # small bookkeeping files, survives restarts
 
 # Timing (in seconds)
 DEPLOY_LOOP_INTERVAL=10    # How often to check for new uploads (10s for testing)
@@ -31,14 +35,14 @@ STABILITY_THRESHOLD=60     # File must be unchanged for this long (60s for testi
 # Fetch settings
 FETCH_LOOP_INTERVAL=30     # How often to check for new fetch requests (seconds)
 FETCH_MAX_SIZE="20G"       # Maximum total size of a single download package
-FETCH_EXPIRY_DAYS=2        # Days after which download packages are auto-deleted
+DOWNLOAD_EXPIRY_HOURS=48   # Hours after which download packages are auto-deleted
 
 # Supported archive extensions
 ARCHIVE_EXTENSIONS="zip tar.gz tar.zst"
 
 # Lock files
-DEPLOY_LOCK_FILE="/tmp/precise-deploy.lock"
-FETCH_LOCK_FILE="/tmp/precise-fetch.lock"
+DEPLOY_LOCK_FILE="${DEPLOY_LOCK_FILE:-/tmp/precise-deploy.lock}"
+FETCH_LOCK_FILE="${FETCH_LOCK_FILE:-/tmp/precise-fetch.lock}"
 
 # Shard size (number of examination folders per shard)
 SHARD_SIZE=100

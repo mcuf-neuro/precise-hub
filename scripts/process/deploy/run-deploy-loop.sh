@@ -39,13 +39,14 @@ log_info "Loop interval: ${DEPLOY_LOOP_INTERVAL} seconds"
 log_info "Stability threshold: ${STABILITY_THRESHOLD} seconds"
 log_info "Organizations: ${ORGANIZATIONS}"
 log_info "Upload sources: ${UPLOAD_SOURCES}"
-log_info "Local staging: ${LOCAL_STAGING_PATH}"
+log_info "Local staging: ${DEPLOY_STAGING_PATH}"
 log_info "Press Ctrl+C to stop"
 
-# Clean up leftover staging files from previous runs (e.g. after crash)
-if [[ -d "${LOCAL_STAGING_PATH}" ]] && ls "${LOCAL_STAGING_PATH}"/* &>/dev/null; then
-  log_warn "Cleaning up leftover staging files in ${LOCAL_STAGING_PATH}"
-  rm -rf "${LOCAL_STAGING_PATH:?}"/*
+# Clean up leftover staging files from previous runs (e.g. after crash).
+# Only this loop's own staging directory: the other loop may be mid-transfer.
+if [[ -d "${DEPLOY_STAGING_PATH}" ]] && ls "${DEPLOY_STAGING_PATH}"/* &>/dev/null; then
+  log_warn "Cleaning up leftover staging files in ${DEPLOY_STAGING_PATH}"
+  rm -rf "${DEPLOY_STAGING_PATH:?}"/*
 fi
 
 # Main loop

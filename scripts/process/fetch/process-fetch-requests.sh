@@ -10,23 +10,36 @@ PROCESS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${PROCESS_DIR}/config.sh"
 source "${PROCESS_DIR}/logging.sh"
 source "${PROCESS_DIR}/validation.sh"
+source "${PROCESS_DIR}/messages.sh"
 
 ensure_directories() {
-  mkdir -p "${LOCAL_STAGING_PATH}"
+  mkdir -p "${FETCH_STAGING_PATH}"
   mkdir -p "${LOG_PATH}"
 }
 
-# Write a JSON status message to [ORG]/messages/
-write_message() {
-  local org="$1"
-  local json_content="$2"
-  local msg_type="$3"
-  local msg_status="$4"
+# Move a processed request out of requests/ into archived-requests/ (partner-visible)
+# and copy it to the data lake logs. A request is archived whether it succeeded or
+# failed, otherwise it would be picked up again every cycle. Failed requests carry a
+# FAILED marker in the archived name; the error message in messages/ has the details.
+archive_request() {
+  local request_file="$1"
+  local org="$2"
+  local outcome="$3"   # "ok" or "failed"
+  local filename
+  filename=$(basename "$request_file")
 
-  local timestamp=$(date -u +"%Y-%m-%dT%H-%M-%SZ")
-  local msg_file="${DEG_PATH}/${org}/messages/msg_${timestamp}_${msg_type}_${msg_status}.json"
-  mkdir -p "${DEG_PATH}/${org}/messages"
-  echo "$json_content" > "$msg_file"
+  local archive_dir="${DEG_PATH}/${org}/archived-requests"
+  local archive_ts
+  archive_ts=$(date -u +"%Y-%m-%dT%H-%M-%SZ")
+  local archived_name="${archive_ts}__${filename}"
+  if [[ "$outcome" != "ok" ]]; then
+    archived_name="${archive_ts}__FAILED__${filename}"
+  fi
+  mkdir -p "$archive_dir"
+  mv -f "$request_file" "${archive_dir}/${archived_name}"
+  cp "${archive_dir}/${archived_name}" "${LOG_PATH}/" || true
+
+  log_json "\"action\": \"archive_request\", \"file\": \"${filename}\", \"outcome\": \"${outcome}\", \"archived_to\": \"${archive_dir}/${archived_name}\""
 }
 
 # Process a single fetch request file
@@ -47,8 +60,9 @@ process_request() {
       --arg file "$filename" \
       --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
       '{type: "fetch", status: "error", request_file: $file, error: "Invalid JSON", timestamp: $ts}')" \
-      "fetch" "error"
+      "fetch" "error" "${filename%.json}"
     log_json "\"action\": \"validate_request\", \"file\": \"${filename}\", \"result\": \"invalid_json\""
+    archive_request "$request_file" "$org" "failed"
     finalize_package_log "failed_validation"
     return 1
   fi
@@ -66,8 +80,9 @@ process_request() {
       --arg req_org "${req_org:-<empty>}" \
       --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
       '{type: "fetch", status: "error", request_file: $file, error: ("Unknown organization: " + $req_org), timestamp: $ts}')" \
-      "fetch" "error"
+      "fetch" "error" "${filename%.json}"
     log_json "\"action\": \"validate_request\", \"file\": \"${filename}\", \"result\": \"unknown_org\", \"org\": \"${req_org:-<empty>}\""
+    archive_request "$request_file" "$org" "failed"
     finalize_package_log "failed_validation"
     return 1
   fi
@@ -79,8 +94,9 @@ process_request() {
       --arg file "$filename" \
       --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
       '{type: "fetch", status: "error", request_file: $file, error: "No requested_ids specified", timestamp: $ts}')" \
-      "fetch" "error"
+      "fetch" "error" "${filename%.json}"
     log_json "\"action\": \"validate_request\", \"file\": \"${filename}\", \"result\": \"no_ids\""
+    archive_request "$request_file" "$org" "failed"
     finalize_package_log "failed_validation"
     return 1
   fi
@@ -117,8 +133,9 @@ process_request() {
       --arg bad_ids "$bad_ids_str" \
       --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
       '{type: "fetch", status: "error", request_file: $file, error: ("Invalid ID format: " + $bad_ids), timestamp: $ts}')" \
-      "fetch" "error"
+      "fetch" "error" "${filename%.json}"
     log_json "\"action\": \"validate_request\", \"file\": \"${filename}\", \"result\": \"invalid_id_format\", \"ids\": \"${bad_ids_str}\""
+    archive_request "$request_file" "$org" "failed"
     finalize_package_log "failed_validation"
     return 1
   fi
@@ -134,8 +151,9 @@ process_request() {
       --arg missing "$missing_str" \
       --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
       '{type: "fetch", status: "error", request_file: $file, error: ("No requested IDs found in data lake: " + $missing), timestamp: $ts}')" \
-      "fetch" "error"
+      "fetch" "error" "${filename%.json}"
     log_json "\"action\": \"validate_request\", \"file\": \"${filename}\", \"result\": \"ids_not_found\", \"missing\": \"${missing_str}\""
+    archive_request "$request_file" "$org" "failed"
     finalize_package_log "failed_validation"
     return 1
   fi
@@ -162,15 +180,15 @@ process_request() {
     --argjson skipped "$missing_json" \
     --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
     '{type: "fetch", status: "received", request_file: $file, requested_ids: $ids, skipped_ids: $skipped, timestamp: $ts}')" \
-    "fetch" "received"
+    "fetch" "received" "${filename%.json}"
 
   log_json "\"action\": \"validate_request\", \"file\": \"${filename}\", \"org\": \"${req_org}\", \"ids\": \"${ids_str}\", \"skipped\": \"${missing_str}\", \"result\": \"valid\", \"ack\": \"written\""
 
   # Step 2: Assemble package on local hub staging
   local base_name="${filename%.json}"
   local archive_name="${org}_fetch_${base_name#request_}.tar.zst"
-  local staging_dir="${LOCAL_STAGING_PATH}/fetch_${base_name}"
-  local archive_path="${LOCAL_STAGING_PATH}/${archive_name}"
+  local staging_dir="${FETCH_STAGING_PATH}/fetch_${base_name}"
+  local archive_path="${FETCH_STAGING_PATH}/${archive_name}"
 
   mkdir -p "$staging_dir"
 
@@ -182,6 +200,13 @@ process_request() {
     if ! rsync -a "$src" "$staging_dir/"; then
       log_error "rsync from data lake failed: ${exam_id}"
       rm -rf "$staging_dir"
+      write_message "$org" "$(jq -n \
+        --arg file "$filename" \
+        --arg id "$exam_id" \
+        --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+        '{type: "fetch", status: "error", request_file: $file, error: ("Could not read " + $id + " from the data lake, please resubmit the request later"), timestamp: $ts}')" \
+        "fetch" "error" "${filename%.json}"
+      archive_request "$request_file" "$org" "failed"
       finalize_package_log "failed_transfer"
       return 1
     fi
@@ -207,15 +232,16 @@ process_request() {
       --arg max "${FETCH_MAX_SIZE}" \
       --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
       '{type: "fetch", status: "error", request_file: $file, error: ("Package too large: " + $size + " exceeds limit " + $max), timestamp: $ts}')" \
-      "fetch" "error"
+      "fetch" "error" "${filename%.json}"
     log_json "\"action\": \"assemble_package\", \"file\": \"${archive_name}\", \"result\": \"too_large\", \"size\": \"${archive_size}\", \"max\": \"${max_bytes}\""
     rm -f "$archive_path"
+    archive_request "$request_file" "$org" "failed"
     finalize_package_log "failed_size_limit"
     return 1
   fi
 
   # Generate checksum (format: "hash  filename" for sha256sum -c compatibility)
-  (cd "$LOCAL_STAGING_PATH" && sha256sum "$archive_name") > "${archive_path}.sha256"
+  (cd "$FETCH_STAGING_PATH" && sha256sum "$archive_name") > "${archive_path}.sha256"
 
   local human_size
   human_size=$(numfmt --to=iec "$archive_size")
@@ -232,7 +258,13 @@ process_request() {
   if ! rsync -a "$archive_path" "${download_dir}/${archive_name}"; then
     log_error "Transfer to DEG failed: ${archive_name}"
     log_json "\"action\": \"transfer_to_deg\", \"file\": \"${archive_name}\", \"result\": \"failed\""
-    rm -f "$archive_path" "${archive_path}.sha256"
+    rm -f "$archive_path" "${archive_path}.sha256" "${download_dir}/${archive_name}"
+    write_message "$org" "$(jq -n \
+      --arg file "$filename" \
+      --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+      '{type: "fetch", status: "error", request_file: $file, error: "Transfer of the package to the DEG failed, please resubmit the request later", timestamp: $ts}')" \
+      "fetch" "error" "${filename%.json}"
+    archive_request "$request_file" "$org" "failed"
     finalize_package_log "failed_transfer"
     return 1
   fi
@@ -252,20 +284,9 @@ process_request() {
     --argjson skipped "$missing_json" \
     --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
     '{type: "fetch", status: "ready", request_file: $file, download_file: $dl_file, included_ids: $ids, skipped_ids: $skipped, timestamp: $ts}')" \
-    "fetch" "ready"
+    "fetch" "ready" "${filename%.json}"
 
-  # Archive request on DEG (partner-visible) — timestamp prefix avoids overwrites on reuse
-  local archive_dir="${DEG_PATH}/${org}/archived-requests"
-  local archive_ts
-  archive_ts=$(date -u +"%Y-%m-%dT%H-%M-%SZ")
-  local archived_name="${archive_ts}__${filename}"
-  mkdir -p "$archive_dir"
-  mv "$request_file" "${archive_dir}/${archived_name}"
-
-  # Copy request to data lake logs (hub-side audit)
-  cp "${archive_dir}/${archived_name}" "${LOG_PATH}/"
-
-  log_json "\"action\": \"notify_and_archive\", \"file\": \"${filename}\", \"result\": \"success\", \"message\": \"ready\", \"archived_to\": \"${archive_dir}\""
+  archive_request "$request_file" "$org" "ok"
 
   # Step 5: Finalize — clean up temp files
   rm -f "$archive_path" "${archive_path}.sha256"
@@ -312,8 +333,8 @@ run_fetch_cycle() {
       if [[ "$expired_file" == *.tar.zst ]]; then
         rm -f "${expired_file}.sha256"
       fi
-      ((expired_count++))
-    done < <(find "$download_dir" -maxdepth 1 -type f \( -name '*_fetch_*.tar.zst' -o -name '*_fetch_*.tar.zst.sha256' \) -mtime +"${FETCH_EXPIRY_DAYS}")
+      expired_count=$((expired_count + 1))
+    done < <(find "$download_dir" -maxdepth 1 -type f \( -name '*_fetch_*.tar.zst' -o -name '*_fetch_*.tar.zst.sha256' \) -mmin +"$((DOWNLOAD_EXPIRY_HOURS * 60))")
 
     if [[ "$expired_count" -gt 0 ]]; then
       local names_str
@@ -322,10 +343,10 @@ run_fetch_cycle() {
       log_info "Removed ${expired_count} expired download(s) for ${org}"
       write_message "$org" "$(jq -n \
         --arg count "$expired_count" \
-        --arg days "${FETCH_EXPIRY_DAYS}" \
+        --arg hours "${DOWNLOAD_EXPIRY_HOURS}" \
         --arg files "$names_str" \
         --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
-        '{type: "fetch", status: "expired", files_removed: ($count | tonumber), files: $files, message: ("Removed after " + $days + " days"), timestamp: $ts}')" \
+        '{type: "fetch", status: "expired", files_removed: ($count | tonumber), files: $files, message: ("Removed after " + $hours + " hours"), timestamp: $ts}')" \
         "fetch" "expired"
       log_json "\"action\": \"expiry_cleanup\", \"org\": \"${org}\", \"files_removed\": ${expired_count}, \"files\": \"${names_str}\""
     fi
