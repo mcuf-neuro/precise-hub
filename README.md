@@ -106,8 +106,7 @@ sudo ./scripts/host/test-mounts.sh
 cd /opt
 sudo git clone <repo-url> precise-hub
 sudo chown -R neuro:neuro /opt/precise-hub
-chmod +x /opt/precise-hub/scripts/process/deploy/*.sh
-chmod +x /opt/precise-hub/scripts/process/fetch/*.sh
+chmod +x /opt/precise-hub/scripts/process/{deploy,fetch,cleanup,index}/*.sh
 ```
 
 Or symlink from an existing checkout:
