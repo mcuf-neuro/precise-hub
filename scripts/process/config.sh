@@ -34,6 +34,12 @@ STATE_PATH="${LOCAL_STAGING_PATH}/state"   # small bookkeeping files, survives r
 DEPLOY_LOOP_INTERVAL=10    # How often to check for new uploads (10s for testing)
 STABILITY_THRESHOLD="${STABILITY_THRESHOLD:-60}"     # File must be unchanged for this long (60s for testing)
 
+# Integrity: archives are only processed once a matching .sha256 file is present.
+# An archive that stays without checksum file is rejected after the timeout.
+# Set REQUIRE_CHECKSUM=0 to fall back to processing stable archives without checksum.
+REQUIRE_CHECKSUM="${REQUIRE_CHECKSUM:-1}"
+MISSING_CHECKSUM_TIMEOUT_MINUTES=60
+
 # Fetch settings
 FETCH_LOOP_INTERVAL=30     # How often to check for new fetch requests (seconds)
 FETCH_MAX_SIZE="${FETCH_MAX_SIZE:-20G}"       # Maximum total (uncompressed) size of one fetch request
@@ -46,10 +52,10 @@ EMPTY_FOLDER_EXPIRY_MINUTES=60 # Remove empty package folders older than this
 CLEANUP_INTERVAL=600           # Seconds between cleanup runs
 
 # Disk space
-# DEG capacity for the free-space check. Leave empty to trust "df" on the DEG mount
-# (only correct if the WebDAV server reports quota); otherwise set e.g. "500G" and
-# the hub computes free space as capacity minus the files in all upload/download folders.
-DEG_CAPACITY_BYTES="${DEG_CAPACITY_BYTES:-}"
+# DEG space allotted to the hub. Free space is the smaller of "df" on the DEG mount
+# (the server reports its overall free space) and this capacity minus the files
+# currently in all upload/download folders. Leave empty to trust "df" alone.
+DEG_CAPACITY_BYTES="${DEG_CAPACITY_BYTES:-500G}"
 DEG_SPACE_MARGIN="${DEG_SPACE_MARGIN:-1G}"      # Always keep at least this much free on the DEG
 STAGING_SPACE_FACTOR=4     # Local staging must have this many times the archive size free
 

@@ -69,6 +69,20 @@ cp "$T/good.sha256" "$DEG_PATH/UKF/upload/UKF_2026-09-24_01.tar.zst.sha256"
 run "$DEPLOY" deploy5
 check "corrected checksum processed"       '[[ -d $DATA_LAKE_PATH/Data/UKF/00000/UKF_00050 && ! -e $DEG_PATH/UKF/upload/UKF_2026-09-24_01.tar.zst ]]'
 
+echo "# missing checksum: wait, reject after timeout; legacy fallback with REQUIRE_CHECKSUM=0"
+mkpkg "$DEG_PATH/UKF/upload" UKF_00301 UKF_00301; rm "$DEG_PATH/UKF/upload/UKF_00301.tar.zst.sha256"
+age '5 minutes ago' "$DEG_PATH/UKF/upload/UKF_00301.tar.zst"
+run "$DEPLOY" deploy_nochk1
+check "stable archive without checksum waits" '[[ -f $DEG_PATH/UKF/upload/UKF_00301.tar.zst && ! -d $DATA_LAKE_PATH/Data/UKF/00300/UKF_00301 ]]'
+age '2 hours ago' "$DEG_PATH/UKF/upload/UKF_00301.tar.zst"
+run "$DEPLOY" deploy_nochk2
+check "rejected after checksum timeout"    '[[ -f $DEG_PATH/UKF/upload/UKF_00301.tar.zst.rejected ]] && grep -q "No checksum file" $DEG_PATH/UKF/messages/*upload_rejected_UKF_00301*'
+rm -f "$DEG_PATH/UKF/upload/UKF_00301.tar.zst.rejected"
+mkpkg "$DEG_PATH/UKF/upload" UKF_00302 UKF_00302; rm "$DEG_PATH/UKF/upload/UKF_00302.tar.zst.sha256"
+age '5 minutes ago' "$DEG_PATH/UKF/upload/UKF_00302.tar.zst"
+REQUIRE_CHECKSUM=0 run "$DEPLOY" deploy_nochk3
+check "legacy mode processes stable file" '[[ -d $DATA_LAKE_PATH/Data/UKF/00300/UKF_00302 ]]'
+
 echo "# rejections: invalid name, empty package; retry after data lake failure"
 mkpkg "$DEG_PATH/UKF/upload" badname UKF_00045
 w=$(mktemp -d); echo x > "$w/readme.txt"; tar -cf - -C "$w" . | zstd -q -o "$DEG_PATH/UKF/upload/UKF_2026-09-24_02.tar.zst"
@@ -136,14 +150,14 @@ rm -f "$DEG_PATH/UKF/upload/fresh.tar.zst"
 
 echo "# data index"
 IDX="$DATA_LAKE_PATH/index/index.json"
-check "index on data lake"                 '[[ $(jq ".case_count" $IDX) -eq 10 ]] && jq -e ".cases[] | select(.id==\"UKF_00042\") | .size_bytes > 0 and .file_count == 1 and .source == \"deg\"" $IDX >/dev/null'
-check "index published to every org"       '[[ -f $DEG_PATH/UKF/index.json && -f $DEG_PATH/UKK/index.json && -f $DEG_PATH/UKF/index.csv ]] && [[ $(wc -l < $DEG_PATH/UKF/index.csv) -eq 11 ]]'
+check "index on data lake"                 '[[ $(jq ".case_count" $IDX) -eq 11 ]] && jq -e ".cases[] | select(.id==\"UKF_00042\") | .size_bytes > 0 and .file_count == 1 and .source == \"deg\"" $IDX >/dev/null'
+check "index published to every org"       '[[ -f $DEG_PATH/UKF/index.json && -f $DEG_PATH/UKK/index.json && -f $DEG_PATH/UKF/index.csv ]] && [[ $(wc -l < $DEG_PATH/UKF/index.csv) -eq 12 ]]'
 added=$(jq -r '.cases[] | select(.id=="UKF_00042") | .added_at' $IDX)
 mkdir -p "$DATA_LAKE_PATH/Data/UKK/00500/UKK_00501" && echo x > "$DATA_LAKE_PATH/Data/UKK/00500/UKK_00501/f"
 "$REBUILD" > "$T/rebuild.log" 2>&1
-check "rebuild finds injected case"        '[[ $(jq ".case_count" $IDX) -eq 11 ]] && jq -e ".cases[] | select(.id==\"UKK_00501\") | .source == \"unknown\"" $IDX >/dev/null'
+check "rebuild finds injected case"        '[[ $(jq ".case_count" $IDX) -eq 12 ]] && jq -e ".cases[] | select(.id==\"UKK_00501\") | .source == \"unknown\"" $IDX >/dev/null'
 check "rebuild keeps added_at"             '[[ "$(jq -r ".cases[] | select(.id==\"UKF_00042\") | .added_at" $IDX)" == "$added" ]]'
-check "rebuild republished"                '[[ $(jq ".case_count" $DEG_PATH/UKK/index.json) -eq 11 ]]'
+check "rebuild republished"                '[[ $(jq ".case_count" $DEG_PATH/UKK/index.json) -eq 12 ]]'
 
 echo "# staging"
 check "staging clean after cycles"         '[[ -z "$(find $LOCAL_STAGING_PATH/deploy $LOCAL_STAGING_PATH/fetch -type f)" ]]'

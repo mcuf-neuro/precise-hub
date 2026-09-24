@@ -247,7 +247,7 @@ The source is recorded in every log entry (`"source": "deg"` or `"source": "fors
 
 **Processing steps:**
 1. Discover archive files in `upload/` and one level of package folders (`upload/ORG_YYYY-MM-DD_NN/`). Two name patterns: `ORG_NNNNN.ext` (one examination, preferred) and `ORG_YYYY-MM-DD_NN.ext` (legacy batch). Extensions: `tar.zst`, `tar.gz`, `zip`.
-2. Validate via SHA-256 checksum (if `.sha256` file exists) or file stability check. Each archive is handled on its own as soon as it is complete; the hub does not wait for a package folder to be "finished". Before the transfer, local staging must have `STAGING_SPACE_FACTOR` times the archive size free, otherwise the archive waits.
+2. Validate via SHA-256 checksum. An archive is processed only once its `.sha256` file is present and matches; without a checksum file it waits and is rejected after `MISSING_CHECKSUM_TIMEOUT_MINUTES` (with `REQUIRE_CHECKSUM=0` a stable archive is processed without checksum instead). Each archive is handled on its own as soon as it is complete; the hub does not wait for a package folder to be "finished". Before the transfer, local staging must have `STAGING_SPACE_FACTOR` times the archive size free, otherwise the archive waits.
 3. Transfer archive to local hub staging area (`/var/tmp/precise-hub/deploy/`)
 4. Extract locally, then rsync exam folders (`ORG_NNNNN`) to sharded location (`/mnt/data-lake/Data/{ORG}/{shard}/`). Each folder is written to a hidden `.partial_*` name first and renamed on completion, so an interrupted transfer never leaves a half-filled folder.
 5. Delete the source archive from the DEG (only if every folder was stored or already existed; otherwise the archive is kept and retried next cycle)
@@ -287,7 +287,7 @@ Safety: the script refuses to run unless `DEG_PATH` is a mountpoint, only looks 
 
 ### Disk Space
 
-The DEG free space is read with `df` on the davfs2 mount. davfs2 only reports real numbers if the WebDAV server supports quota properties. Check `df -h /mnt/deg` on the hub: if the number is obviously wrong, set `DEG_CAPACITY_BYTES` (e.g. `500G`) and the hub computes free space as capacity minus the size of all files in the upload and download folders.
+The DEG free space is the smaller of two numbers: what `df` reports on the davfs2 mount (the server's overall free space, which the DEG does report) and `DEG_CAPACITY_BYTES` minus the size of all files currently in the upload and download folders (the hub's own allotment). A fetch request is rejected if it would not fit below `DEG_SPACE_MARGIN`.
 
 Local staging (`LOCAL_STAGING_PATH`) needs room for roughly three copies of the largest package (davfs2 cache, archive copy, extracted content). Keep the davfs2 cache (`cache_dir` in `davfs2.conf`) on a local disk with enough space as well.
 
@@ -352,10 +352,12 @@ Edit `scripts/process/config.sh` to adjust processing parameters. The mount poin
 | `UPLOAD_SOURCES` | `${DEG_PATH} ${FORSCHUNGSSPEICHER_PATH}` | Paths scanned for `{ORG}/upload/` folders |
 | `DEPLOY_LOOP_INTERVAL` | `10` | Seconds between deploy processing cycles |
 | `FETCH_LOOP_INTERVAL` | `30` | Seconds between fetch processing cycles |
-| `STABILITY_THRESHOLD` | `60` | Seconds a file must be unchanged before processing (when no checksum) or before a checksum mismatch / invalid name is declared |
+| `STABILITY_THRESHOLD` | `60` | Seconds a file must be unchanged before a checksum mismatch or invalid name is declared (and before processing, if `REQUIRE_CHECKSUM=0`) |
+| `REQUIRE_CHECKSUM` | `1` | Process archives only with a matching `.sha256` file |
+| `MISSING_CHECKSUM_TIMEOUT_MINUTES` | `60` | Reject an archive that has had no checksum file for this long |
 | `FETCH_MAX_SIZE` | `20G` | Maximum total (uncompressed) size of one fetch request |
 | `FETCH_MAX_CASE_SIZE` | `4G` | Maximum (uncompressed) size of one case; larger cases are skipped |
-| `DEG_CAPACITY_BYTES` | empty | DEG capacity for the space check; empty trusts `df` on the DEG mount |
+| `DEG_CAPACITY_BYTES` | `500G` | Space allotted to the hub on the DEG; free space is the smaller of `df` and this minus the files in upload/download |
 | `DEG_SPACE_MARGIN` | `1G` | Free space always kept on the DEG |
 | `STAGING_SPACE_FACTOR` | `4` | Local staging must have this many times the archive size free before an upload is processed |
 | `UPLOAD_EXPIRY_HOURS` | `48` | Hours after which files left in `upload/` are deleted |

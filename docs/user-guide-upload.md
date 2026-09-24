@@ -39,7 +39,7 @@ UKF/upload/
 Rules:
 
 - Each archive contains exactly one folder, `ORG_NNNNN/`, at its top level. The archive is named after that folder.
-- Every archive has a checksum file next to it. Upload the archive first, then its checksum file: the checksum file tells the hub that the archive is complete. Most clients (e.g. WinSCP) upload a folder in alphabetical order, which already does this.
+- Every archive must have a checksum file next to it; archives without one are not processed. Upload the archive first, then its checksum file: the checksum file tells the hub that the archive is complete. Most clients (e.g. WinSCP) upload a folder in alphabetical order, which already does this.
 - Package files may also be placed directly in `upload/` without a grouping folder.
 - Packages are processed one by one, as soon as each one is complete. A problem with one examination does not affect the others.
 
@@ -93,14 +93,14 @@ Collect all `.tar.zst` and `.sha256` files in a folder `UKF_2025-12-15_00` and u
 
 A single archive `ORG_YYYY-MM-DD_NN.tar.zst` containing several examination folders is still accepted, but only if it is smaller than the DEG transfer limit (a few GB). Prefer per-examination packages.
 
-## Checksum
+## Checksum (Required)
 
 The checksum file must contain the SHA-256 hash as the first field:
 ```
 a1b2c3d4e5f6...  UKF_00042.tar.zst
 ```
 
-An archive without a checksum file is processed once it has been unchanged for 60 seconds. This fallback cannot detect an interrupted upload, so always include the checksum.
+The hub processes an archive only after a matching checksum file has arrived. An archive that has no checksum file after one hour is rejected; upload both files again.
 
 ## What Happens Next
 
@@ -109,6 +109,6 @@ The hub writes a status message to your `messages/` folder for every processed p
 - `stored` — the package was processed. `stored_ids` lists the stored examinations, `skipped_existing_ids` those that were already in the data lake (existing examinations are never overwritten). The archive and its checksum file are removed from `upload/`.
 - `rejected` — the package was not accepted. The `error` field explains why:
   - **Checksum mismatch:** the checksum file is renamed to `NAME.sha256.mismatch` and the archive is kept. Upload a correct `.sha256` file to retry, or re-upload both files.
-  - **Invalid file name, corrupt archive, or no `ORG_NNNNN` folder at the top level:** the files are renamed to `NAME.rejected`. Fix the package and upload it again under its proper name.
+  - **Missing checksum file (after one hour), invalid file name, corrupt archive, or no `ORG_NNNNN` folder at the top level:** the files are renamed to `NAME.rejected`. Fix the package and upload it again under its proper name.
 
 Files left in `upload/` (rejected packages, abandoned uploads) are deleted automatically after 48 hours. Empty upload folders are removed after one hour.

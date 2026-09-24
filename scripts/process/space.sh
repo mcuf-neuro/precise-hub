@@ -23,20 +23,26 @@ deg_used_bytes() {
   echo "$total"
 }
 
-# Free bytes on the DEG. davfs2 only reports real numbers when the WebDAV server
-# supports quota properties; otherwise DEG_CAPACITY_BYTES must be configured and
-# the free space is derived from the capacity minus the files currently stored.
+# Free bytes on the DEG: the smaller of what "df" reports for the mount (the
+# server's overall free space, only meaningful if the WebDAV server supports quota
+# properties) and the hub's own allotment DEG_CAPACITY_BYTES minus the files
+# currently in all upload/download folders.
 deg_free_bytes() {
-  if [[ -n "${DEG_CAPACITY_BYTES:-}" ]]; then
-    local capacity used
-    capacity=$(numfmt --from=iec "${DEG_CAPACITY_BYTES}" 2>/dev/null || echo "${DEG_CAPACITY_BYTES}")
-    used=$(deg_used_bytes)
-    local free=$((capacity - used))
-    [[ $free -lt 0 ]] && free=0
-    echo "$free"
-  else
-    free_bytes "${DEG_PATH}"
+  local df_free
+  df_free=$(free_bytes "${DEG_PATH}")
+  if [[ -z "${DEG_CAPACITY_BYTES:-}" ]]; then
+    echo "${df_free:-0}"
+    return
   fi
+  local capacity used
+  capacity=$(numfmt --from=iec "${DEG_CAPACITY_BYTES}" 2>/dev/null || echo "${DEG_CAPACITY_BYTES}")
+  used=$(deg_used_bytes)
+  local free=$((capacity - used))
+  [[ $free -lt 0 ]] && free=0
+  if [[ "${df_free:-0}" -gt 0 && "$df_free" -lt "$free" ]]; then
+    free=$df_free
+  fi
+  echo "$free"
 }
 
 # Total size in bytes of a directory tree (as stored, uncompressed)

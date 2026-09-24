@@ -374,7 +374,19 @@ process_org_source() {
         continue
       fi
 
-      # Branch 3: No checksum - check file stability
+      # Branch 3: No checksum. With REQUIRE_CHECKSUM the archive waits for its
+      # checksum file and is rejected once the timeout has passed.
+      if [[ "${REQUIRE_CHECKSUM}" == "1" ]]; then
+        if is_file_stable "$archive_file" "$((MISSING_CHECKSUM_TIMEOUT_MINUTES * 60))"; then
+          reject_upload "$archive_file" "$org" "$source_label" \
+            "No checksum file received within ${MISSING_CHECKSUM_TIMEOUT_MINUTES} minutes. Uploads are only processed with a matching .sha256 file; upload both files again."
+        else
+          log_debug "Waiting for checksum file: ${filename}"
+        fi
+        continue
+      fi
+
+      # Legacy fallback (REQUIRE_CHECKSUM=0): process once the file is stable
       if is_file_stable "$archive_file"; then
         log_info "Found stable archive (no checksum): ${filename} (${source_label})"
         log_json "\"action\": \"stability_check\", \"file\": \"${filename}\", \"source\": \"${source_label}\", \"result\": \"stable\""
