@@ -55,47 +55,50 @@ UKF requests two examinations from other sites:
 
 2. **Validation** — The hub checks that the requested IDs exist in the data lake. If any ID is invalid or not found, you'll get an error message in `messages/` explaining why.
 
-3. **Assembly** — The hub collects the requested examination folders, archives them, and generates a checksum.
+3. **Assembly** — The hub packs every requested examination into its own archive (`ORG_NNNNN.tar.zst`, containing the folder `ORG_NNNNN/`) with a checksum file. Per-examination packages keep every transfer below the DEG size limit.
 
-4. **Delivery** — The package appears in your `download/` folder:
+4. **Delivery** — A folder named after your request appears in `download/`:
    ```
    UKF/download/
-   ├── UKF_fetch_2026-04-16_00.tar.zst
-   └── UKF_fetch_2026-04-16_00.tar.zst.sha256
+   └── UKF_fetch_2026-04-16_00/
+       ├── manifest.json               # list of cases, sizes and checksums
+       ├── UKK_00301.tar.zst
+       ├── UKK_00301.tar.zst.sha256
+       ├── UKW_02043.tar.zst
+       └── UKW_02043.tar.zst.sha256
    ```
 
-5. **Notification** — A "ready" message in your `messages/` folder confirms the package is available for download.
+5. **Notification** — A "ready" message in your `messages/` folder names the download folder and lists `included_ids`, `skipped_ids` (not in the data lake) and `too_large_ids` (above the per-case limit).
 
 6. **Archival** — Your original request file is moved from `requests/` to `archived-requests/` so you can reference it later.
 
 ## Downloading the Package
 
-Connect to the DEG with WinSCP or another client and download from `[ORG]/download/`:
+Connect to the DEG with WinSCP or another client and download the whole folder `[ORG]/download/UKF_fetch_2026-04-16_00/`.
 
-- `UKF_fetch_2026-04-16_00.tar.zst` — the data archive
-- `UKF_fetch_2026-04-16_00.tar.zst.sha256` — SHA-256 checksum
-
-### Verify the Checksum
+### Verify the Checksums
 
 **Linux:**
 ```bash
-sha256sum -c UKF_fetch_2026-04-16_00.tar.zst.sha256
+cd UKF_fetch_2026-04-16_00 && sha256sum -c *.sha256
 ```
 
 **Windows (7-Zip):**
-1. Right-click the `.tar.zst` file → **7-Zip** → **CRC SHA** → **SHA-256**
-2. Compare the displayed hash with the content of the `.sha256` file
+1. Right-click a `.tar.zst` file → **7-Zip** → **CRC SHA** → **SHA-256**
+2. Compare the displayed hash with the content of the matching `.sha256` file
 
-### Extract the Archive
+### Extract the Archives
 
 **Linux:**
 ```bash
-tar -xf UKF_fetch_2026-04-16_00.tar.zst --use-compress-program=zstd
+for f in *.tar.zst; do tar -xf "$f" --use-compress-program=zstd; done
 ```
 
 **Windows (7-Zip):**
-1. Right-click `UKF_fetch_2026-04-16_00.tar.zst` → **7-Zip** → **Extract Here**
-2. Right-click the resulting `.tar` → **7-Zip** → **Extract Here**
+1. Select all `.tar.zst` files → right-click → **7-Zip** → **Extract Here**
+2. Select the resulting `.tar` files → right-click → **7-Zip** → **Extract Here**
+
+Each archive extracts to one examination folder, e.g. `UKK_00301/`.
 
 ## Checking Status Messages
 
@@ -106,7 +109,7 @@ The hub writes JSON messages to your `messages/` folder. Check this folder for u
 | `received` | Hub has received and is processing your request |
 | `ready` | Package is assembled and available in `download/` |
 | `error` | Something went wrong — see the `error` field for details |
-| `expired` | Download package was auto-deleted (default: after 48 hours) |
+| `expired` | Download packages were auto-deleted (default: after 48 hours) |
 
 Upload results are reported in the same folder with `type: "upload"`:
 
@@ -119,6 +122,6 @@ Upload results are reported in the same folder with `type: "upload"`:
 
 - **Download expiry:** Packages in `download/` are automatically deleted after 48 hours. Download promptly after receiving a "ready" notification.
 - **Failed requests:** A request that could not be fulfilled is moved to `archived-requests/` with a `FAILED` marker in its name, together with an error message in `messages/`. To retry, submit a new request file.
-- **Size limit:** Requests that would produce a package larger than 20 GB are rejected with an error message.
+- **Size limits:** A single examination larger than 4 GB cannot be transferred through the DEG and is skipped (listed in `too_large_ids`). A request whose examinations exceed 20 GB in total is rejected; split it into several requests. If the DEG is out of space, the request is rejected with an error message; download and delete your existing packages, then resubmit.
 - **One request per file:** Each JSON file should contain one request. For multiple independent requests, create separate files (`request_2026-04-16_00.json`, `request_2026-04-16_01.json`, …).
 - **Examination IDs:** IDs follow the format `ORG_NNNNN` (3-letter org code + underscore + 5-digit number). You need to know the exact IDs you want to request.

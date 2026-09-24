@@ -9,7 +9,9 @@ The hub connects three storage systems:
 
 Two independent processing loops run continuously:
 - **Deploy** — scans for uploaded data packages, validates, extracts, and stores them in the data lake
-- **Fetch** — scans for data fetch requests, assembles packages from the data lake, and delivers them to the DEG
+- **Fetch** — scans for data fetch requests, assembles packages from the data lake, and delivers them to the DEG; also runs the DEG cleanup
+
+Because the DEG (WebDAV) cannot reliably transfer files larger than a few GB, data moves as one package per examination (`ORG_NNNNN.tar.zst` + `.sha256`) in both directions.
 
 ## Architecture
 
@@ -40,12 +42,17 @@ scripts/process/
 ├── logging.sh             # shared JSON logging functions
 ├── validation.sh          # shared validation functions
 ├── messages.sh            # shared partner-visible status messages
+├── space.sh               # shared disk space helpers
 ├── deploy/
 │   ├── run-deploy-loop.sh         # deploy processing loop
 │   └── process-uploads.sh         # upload processing logic
-└── fetch/
-    ├── run-fetch-loop.sh          # fetch processing loop
-    └── process-fetch-requests.sh  # fetch request processing logic
+├── fetch/
+│   ├── run-fetch-loop.sh          # fetch processing loop
+│   └── process-fetch-requests.sh  # fetch request processing logic
+└── cleanup/
+    └── cleanup-deg.sh             # removes stale data from DEG upload/ and download/
+
+scripts/test/e2e.sh        # end-to-end test against local fake mount directories
 ```
 
 ## Prerequisites
@@ -113,6 +120,11 @@ sudo ln -s /home/neuro/precise-hub /opt/precise-hub
 
 # Test fetch (request processing)
 /opt/precise-hub/scripts/process/fetch/process-fetch-requests.sh
+```
+
+The end-to-end test runs both pipelines against temporary local directories and needs no mounts:
+```bash
+scripts/test/e2e.sh
 ```
 
 ### 6. Install systemd Services
@@ -205,8 +217,8 @@ The deploy loop runs continuously (default: every 10 seconds) and scans for new 
 The source is recorded in every log entry (`"source": "deg"` or `"source": "forschungsspeicher"`), so you can always trace where a package entered the data lake.
 
 **Processing steps:**
-1. Discover archive files matching `ORG_YYYY-MM-DD_NN.{tar.zst|tar.gz|zip}`
-2. Validate via SHA-256 checksum (if `.sha256` file exists) or file stability check
+1. Discover archive files in `upload/` and one level of package folders (`upload/ORG_YYYY-MM-DD_NN/`). Two name patterns: `ORG_NNNNN.ext` (one examination, preferred) and `ORG_YYYY-MM-DD_NN.ext` (legacy batch). Extensions: `tar.zst`, `tar.gz`, `zip`.
+2. Validate via SHA-256 checksum (if `.sha256` file exists) or file stability check. Each archive is handled on its own as soon as it is complete; the hub does not wait for a package folder to be "finished". Before the transfer, local staging must have `STAGING_SPACE_FACTOR` times the archive size free, otherwise the archive waits.
 3. Transfer archive to local hub staging area (`/var/tmp/precise-hub/deploy/`)
 4. Extract locally, then rsync exam folders (`ORG_NNNNN`) to sharded location (`/mnt/data-lake/Data/{ORG}/{shard}/`). Each folder is written to a hidden `.partial_*` name first and renamed on completion, so an interrupted transfer never leaves a half-filled folder.
 5. Delete the source archive from the DEG (only if every folder was stored or already existed; otherwise the archive is kept and retried next cycle)
@@ -223,24 +235,41 @@ The fetch loop runs continuously (default: every 30 seconds) and scans for new J
 
 **Processing steps:**
 1. Discover `.json` request files
-2. Parse, validate (known org, valid ID format, IDs exist in data lake), write "received" message to `[ORG]/messages/`
-3. Rsync exam folders from data lake to local hub staging (`/var/tmp/precise-hub/fetch/`), assemble archive + checksum
-4. Transfer archive + checksum to `[ORG]/download/` on the DEG
+2. Parse, validate (known org, valid ID format, IDs exist in data lake)
+3. Size checks from the data lake folder sizes, before anything is copied: cases above `FETCH_MAX_CASE_SIZE` are skipped (`too_large_ids`), a total above `FETCH_MAX_SIZE` is rejected, and the request is rejected if the DEG or the local staging area lacks the space. Then write "received" message to `[ORG]/messages/`
+4. For each case: rsync from data lake to local staging (`/var/tmp/precise-hub/fetch/`), create `ORG_NNNNN.tar.zst` + `.sha256`, transfer both into `[ORG]/download/ORG_fetch_YYYY-MM-DD_NN/`. Finally write `manifest.json` there.
 5. Write "ready" message to `[ORG]/messages/`, archive request file to `[ORG]/archived-requests/`
 6. Write JSON log to `/mnt/data-lake/logs/`
 
 Failed requests (invalid JSON, unknown organization, no IDs found, transfer errors) are archived too, as `<timestamp>__FAILED__<request>.json`, after the error message has been written. A request is therefore never processed twice; to retry, the partner submits a new request file.
 
-**Automatic cleanup:** Downloads older than `DOWNLOAD_EXPIRY_HOURS` are auto-deleted from `[ORG]/download/`.
+### DEG Cleanup
+
+`cleanup/cleanup-deg.sh` is called by the fetch loop every cycle and throttles itself to `CLEANUP_INTERVAL`. It removes files older than `UPLOAD_EXPIRY_HOURS` from `[ORG]/upload/` (rejected packages, checksum mismatches, abandoned uploads) and files older than `DOWNLOAD_EXPIRY_HOURS` from `[ORG]/download/`, then removes package folders that became empty and empty folders older than `EMPTY_FOLDER_EXPIRY_MINUTES`. Partners get an `expired` message per area.
+
+Safety: the script refuses to run unless `DEG_PATH` is a mountpoint, only looks two levels below `upload/` and `download/` of the configured organizations, never follows symlinks and never touches `requests/`, `archived-requests/` or `messages/`.
+
+```bash
+# See what would be removed
+/opt/precise-hub/scripts/process/cleanup/cleanup-deg.sh --dry-run
+# Run now, ignoring the throttle
+/opt/precise-hub/scripts/process/cleanup/cleanup-deg.sh --force
+```
+
+### Disk Space
+
+The DEG free space is read with `df` on the davfs2 mount. davfs2 only reports real numbers if the WebDAV server supports quota properties. Check `df -h /mnt/deg` on the hub: if the number is obviously wrong, set `DEG_CAPACITY_BYTES` (e.g. `500G`) and the hub computes free space as capacity minus the size of all files in the upload and download folders.
+
+Local staging (`LOCAL_STAGING_PATH`) needs room for roughly three copies of the largest package (davfs2 cache, archive copy, extracted content). Keep the davfs2 cache (`cache_dir` in `davfs2.conf`) on a local disk with enough space as well.
 
 ### DEG Folder Layout (per Organization)
 
 ```
 [ORG]/
-├── upload/              # incoming data packages
+├── upload/              # incoming data packages (ORG_NNNNN.tar.zst + .sha256, optionally in a package folder)
 ├── requests/            # JSON fetch request files
-├── archived-requests/   # processed request files
-├── download/            # assembled fetch packages
+├── archived-requests/   # processed request files (FAILED__ prefix for rejected ones)
+├── download/            # one folder per fetch request with per-case packages and manifest.json
 └── messages/            # status notifications from the hub
 ```
 
@@ -260,7 +289,7 @@ Failed requests (invalid JSON, unknown organization, no IDs found, transfer erro
 
 ## Configuration
 
-Edit `scripts/process/config.sh` to adjust processing parameters. The mount points, `LOCAL_STAGING_PATH` and the lock file paths can also be overridden through environment variables of the same name, which allows running the scripts against local test directories.
+Edit `scripts/process/config.sh` to adjust processing parameters. The mount points, `LOCAL_STAGING_PATH`, the lock file paths and the size limits can also be overridden through environment variables of the same name, which allows running the scripts against local test directories.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -268,10 +297,17 @@ Edit `scripts/process/config.sh` to adjust processing parameters. The mount poin
 | `UPLOAD_SOURCES` | `${DEG_PATH} ${FORSCHUNGSSPEICHER_PATH}` | Paths scanned for `{ORG}/upload/` folders |
 | `DEPLOY_LOOP_INTERVAL` | `10` | Seconds between deploy processing cycles |
 | `FETCH_LOOP_INTERVAL` | `30` | Seconds between fetch processing cycles |
-| `STABILITY_THRESHOLD` | `60` | Seconds a file must be unchanged before processing (when no checksum) |
-| `FETCH_MAX_SIZE` | `20G` | Maximum size of a single fetch download package |
-| `DOWNLOAD_EXPIRY_HOURS` | `48` | Hours after which download packages are auto-deleted |
-| `LOCAL_STAGING_PATH` | `/var/tmp/precise-hub` | Local hub directory for staging; `deploy/` and `fetch/` subdirectories, one per loop |
+| `STABILITY_THRESHOLD` | `60` | Seconds a file must be unchanged before processing (when no checksum) or before a checksum mismatch / invalid name is declared |
+| `FETCH_MAX_SIZE` | `20G` | Maximum total (uncompressed) size of one fetch request |
+| `FETCH_MAX_CASE_SIZE` | `4G` | Maximum (uncompressed) size of one case; larger cases are skipped |
+| `DEG_CAPACITY_BYTES` | empty | DEG capacity for the space check; empty trusts `df` on the DEG mount |
+| `DEG_SPACE_MARGIN` | `1G` | Free space always kept on the DEG |
+| `STAGING_SPACE_FACTOR` | `4` | Local staging must have this many times the archive size free before an upload is processed |
+| `UPLOAD_EXPIRY_HOURS` | `48` | Hours after which files left in `upload/` are deleted |
+| `DOWNLOAD_EXPIRY_HOURS` | `48` | Hours after which download packages are deleted |
+| `EMPTY_FOLDER_EXPIRY_MINUTES` | `60` | Minutes after which empty package folders are removed |
+| `CLEANUP_INTERVAL` | `600` | Seconds between DEG cleanup runs |
+| `LOCAL_STAGING_PATH` | `/var/tmp/precise-hub` | Local hub directory for staging; `deploy/`, `fetch/` and `state/` subdirectories |
 | `SHARD_SIZE` | `100` | Exam folders per shard directory |
 
 After changing configuration, restart the affected service:
