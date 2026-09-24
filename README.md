@@ -43,14 +43,17 @@ scripts/process/
 ├── validation.sh          # shared validation functions
 ├── messages.sh            # shared partner-visible status messages
 ├── space.sh               # shared disk space helpers
+├── index.sh               # shared data index functions (update, publish)
 ├── deploy/
 │   ├── run-deploy-loop.sh         # deploy processing loop
 │   └── process-uploads.sh         # upload processing logic
 ├── fetch/
 │   ├── run-fetch-loop.sh          # fetch processing loop
 │   └── process-fetch-requests.sh  # fetch request processing logic
-└── cleanup/
-    └── cleanup-deg.sh             # removes stale data from DEG upload/ and download/
+├── cleanup/
+│   └── cleanup-deg.sh             # removes stale data from DEG upload/ and download/
+└── index/
+    └── rebuild-index.sh           # rebuilds the data index from the data lake content
 
 scripts/test/e2e.sh        # end-to-end test against local fake mount directories
 ```
@@ -169,11 +172,38 @@ WantedBy=multi-user.target
 EOF
 ```
 
-Enable and start both:
+**Index rebuild timer** (nightly, catches data injected directly into the data lake):
+```bash
+sudo tee /etc/systemd/system/precise-hub-index.service << 'EOF'
+[Unit]
+Description=PRECISE Hub Index Rebuild
+After=remote-fs.target
+
+[Service]
+Type=oneshot
+User=neuro
+ExecStart=/opt/precise-hub/scripts/process/index/rebuild-index.sh
+EOF
+
+sudo tee /etc/systemd/system/precise-hub-index.timer << 'EOF'
+[Unit]
+Description=Nightly PRECISE Hub index rebuild
+
+[Timer]
+OnCalendar=*-*-* 00:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+```
+
+Enable and start:
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now precise-hub-deploy.service
 sudo systemctl enable --now precise-hub-fetch.service
+sudo systemctl enable --now precise-hub-index.timer
 ```
 
 ## Operations
@@ -262,6 +292,28 @@ The DEG free space is read with `df` on the davfs2 mount. davfs2 only reports re
 
 Local staging (`LOCAL_STAGING_PATH`) needs room for roughly three copies of the largest package (davfs2 cache, archive copy, extracted content). Keep the davfs2 cache (`cache_dir` in `davfs2.conf`) on a local disk with enough space as well.
 
+### Data Index
+
+`/mnt/data-lake/index/index.json` lists every case in the data lake:
+
+```json
+{
+  "generated": "2026-09-24T15:26:39Z",
+  "case_count": 1234,
+  "total_bytes": 987654321,
+  "cases": [
+    {"id": "UKF_00042", "org": "UKF", "shard": "00000", "size_bytes": 20480, "file_count": 12,
+     "added_at": "2026-09-24T15:26:39Z", "updated_at": null, "source": "deg", "package": "UKF_00042.tar.zst"}
+  ]
+}
+```
+
+`size_bytes` is the uncompressed size as stored. The deploy loop adds entries after every stored package and publishes the index as `index.json` and `index.csv` into every `[ORG]/` folder on the DEG at the end of the cycle, so partners can look up which cases exist before writing fetch requests. The nightly `rebuild-index.sh` walks the data lake and picks up cases that were injected directly, keeping `added_at`, `source` and `package` of known cases (folder mtime and `unknown` for new ones). Run it by hand after a direct injection:
+
+```bash
+/opt/precise-hub/scripts/process/index/rebuild-index.sh
+```
+
 ### DEG Folder Layout (per Organization)
 
 ```
@@ -270,7 +322,9 @@ Local staging (`LOCAL_STAGING_PATH`) needs room for roughly three copies of the 
 ├── requests/            # JSON fetch request files
 ├── archived-requests/   # processed request files (FAILED__ prefix for rejected ones)
 ├── download/            # one folder per fetch request with per-case packages and manifest.json
-└── messages/            # status notifications from the hub
+├── messages/            # status notifications from the hub
+├── index.json           # data index (all cases in the data lake), published by the hub
+└── index.csv            # same as CSV
 ```
 
 ### Data Lake Layout
@@ -284,6 +338,8 @@ Local staging (`LOCAL_STAGING_PATH`) needs room for roughly three copies of the 
 │   │   └── ...
 │   ├── UKK/
 │   └── ...
+├── index/
+│   └── index.json           # data index (leading copy)
 └── logs/                    # JSON processing logs
 ```
 

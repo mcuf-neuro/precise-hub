@@ -12,6 +12,7 @@ source "${PROCESS_DIR}/logging.sh"
 source "${PROCESS_DIR}/validation.sh"
 source "${PROCESS_DIR}/messages.sh"
 source "${PROCESS_DIR}/space.sh"
+source "${PROCESS_DIR}/index.sh"
 
 ensure_directories() {
   mkdir -p "${DEPLOY_STAGING_PATH}"
@@ -157,6 +158,7 @@ process_archive() {
 
   # Step 3: Transfer extracted examination folders from hub to data lake
   local stored=() skipped=() invalid=() failed=()
+  local index_entries=()
 
   for exam_folder in "${staging_dir}"/*; do
     if [[ ! -d "$exam_folder" ]]; then
@@ -209,7 +211,17 @@ process_archive() {
     fi
     log_json "\"action\": \"store_exam_folder\", \"folder\": \"${exam_name}\", \"shard\": \"${shard_dir}\", \"result\": \"stored\""
     stored+=("$exam_name")
+    # Index entry from the local copy (same content, no data lake round-trip)
+    index_entries+=("$(index_entry_from_folder "$exam_folder" "$exam_name" "$source_label" "$filename")")
   done
+
+  if [[ ${#index_entries[@]} -gt 0 ]]; then
+    if index_merge "$(printf '%s\n' "${index_entries[@]}" | jq -sc .)"; then
+      log_json "\"action\": \"index_update\", \"cases\": ${#index_entries[@]}, \"result\": \"success\""
+    else
+      log_error "Index update failed for ${filename} (data is stored; run index/rebuild-index.sh)"
+    fi
+  fi
 
   log_info "Processing complete: ${#stored[@]} stored, ${#skipped[@]} skipped (existing), ${#invalid[@]} invalid, ${#failed[@]} failed"
 
@@ -388,6 +400,9 @@ run_processing_cycle() {
       process_org_source "$org" "$source_base" "$source_label"
     done
   done
+
+  # Publish the index to the DEG if it changed during this cycle
+  index_publish if-dirty || log_error "Index publish failed"
 
   log_info "Processing cycle complete"
 }

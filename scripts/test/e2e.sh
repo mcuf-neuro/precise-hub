@@ -13,6 +13,7 @@ export STABILITY_THRESHOLD=60 DEG_REQUIRE_MOUNTPOINT=0
 DEPLOY="$REPO/scripts/process/deploy/process-uploads.sh"
 FETCH="$REPO/scripts/process/fetch/process-fetch-requests.sh"
 CLEANUP="$REPO/scripts/process/cleanup/cleanup-deg.sh"
+REBUILD="$REPO/scripts/process/index/rebuild-index.sh"
 mkdir -p "$DEG_PATH"/{UKF,UKK}/{upload,requests,download,messages} "$DATA_LAKE_PATH" "$FORSCHUNGSSPEICHER_PATH/UKF/upload"
 
 FAIL=0
@@ -132,6 +133,17 @@ check "expired messages written"           '[[ $(msgs UKF fetch_expired) -eq 1 &
 "$CLEANUP" > "$T/cleanup_throttled.log" 2>&1
 check "second run throttled"               '! grep -q "cleanup started" $T/cleanup_throttled.log'
 rm -f "$DEG_PATH/UKF/upload/fresh.tar.zst"
+
+echo "# data index"
+IDX="$DATA_LAKE_PATH/index/index.json"
+check "index on data lake"                 '[[ $(jq ".case_count" $IDX) -eq 10 ]] && jq -e ".cases[] | select(.id==\"UKF_00042\") | .size_bytes > 0 and .file_count == 1 and .source == \"deg\"" $IDX >/dev/null'
+check "index published to every org"       '[[ -f $DEG_PATH/UKF/index.json && -f $DEG_PATH/UKK/index.json && -f $DEG_PATH/UKF/index.csv ]] && [[ $(wc -l < $DEG_PATH/UKF/index.csv) -eq 11 ]]'
+added=$(jq -r '.cases[] | select(.id=="UKF_00042") | .added_at' $IDX)
+mkdir -p "$DATA_LAKE_PATH/Data/UKK/00500/UKK_00501" && echo x > "$DATA_LAKE_PATH/Data/UKK/00500/UKK_00501/f"
+"$REBUILD" > "$T/rebuild.log" 2>&1
+check "rebuild finds injected case"        '[[ $(jq ".case_count" $IDX) -eq 11 ]] && jq -e ".cases[] | select(.id==\"UKK_00501\") | .source == \"unknown\"" $IDX >/dev/null'
+check "rebuild keeps added_at"             '[[ "$(jq -r ".cases[] | select(.id==\"UKF_00042\") | .added_at" $IDX)" == "$added" ]]'
+check "rebuild republished"                '[[ $(jq ".case_count" $DEG_PATH/UKK/index.json) -eq 11 ]]'
 
 echo "# staging"
 check "staging clean after cycles"         '[[ -z "$(find $LOCAL_STAGING_PATH/deploy $LOCAL_STAGING_PATH/fetch -type f)" ]]'

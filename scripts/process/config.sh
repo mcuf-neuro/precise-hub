@@ -20,6 +20,8 @@ UPLOAD_SOURCES="${DEG_PATH} ${FORSCHUNGSSPEICHER_PATH}"
 TMP_PATH="${DATA_LAKE_PATH}/tmp"
 LOG_PATH="${DATA_LAKE_PATH}/logs"
 DATA_PATH="${DATA_LAKE_PATH}/Data"
+INDEX_PATH="${DATA_LAKE_PATH}/index"
+INDEX_FILE="${INDEX_PATH}/index.json"   # leading copy; published to DEG [ORG]/index.json + index.csv
 
 # Local staging area (on the hub VM, avoids network round-trips during processing).
 # Each loop owns a subdirectory and only ever cleans its own.
