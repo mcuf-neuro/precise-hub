@@ -9,9 +9,10 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 T="${1:-$(mktemp -d /tmp/precise-e2e.XXXXXX)}"
 rm -rf "${T:?}"/*
 export DEG_PATH="$T/deg" FORSCHUNGSSPEICHER_PATH="$T/fs" DATA_LAKE_PATH="$T/dl" LOCAL_STAGING_PATH="$T/staging"
-export STABILITY_THRESHOLD=60
+export STABILITY_THRESHOLD=60 DEG_REQUIRE_MOUNTPOINT=0
 DEPLOY="$REPO/scripts/process/deploy/process-uploads.sh"
 FETCH="$REPO/scripts/process/fetch/process-fetch-requests.sh"
+CLEANUP="$REPO/scripts/process/cleanup/cleanup-deg.sh"
 mkdir -p "$DEG_PATH"/{UKF,UKK}/{upload,requests,download,messages} "$DATA_LAKE_PATH" "$FORSCHUNGSSPEICHER_PATH/UKF/upload"
 
 FAIL=0
@@ -88,19 +89,49 @@ echo '{"organization":"UKF","requested_ids":["UKK_00301","UKK_00150","UKK_00999"
 echo '{oops' > "$DEG_PATH/UKF/requests/request_2026-09-24_01.json"
 echo '{"organization":"XXX","requested_ids":["UKK_00301"]}' > "$DEG_PATH/UKF/requests/request_2026-09-24_02.json"
 run "$FETCH" fetch1
-check "download package + valid checksum"  '(cd $DEG_PATH/UKF/download && sha256sum -c --quiet *.sha256)'
+DL="$DEG_PATH/UKF/download/UKF_fetch_2026-09-24_00"
+check "per-case packages + valid checksums" '(cd $DL && sha256sum -c --quiet UKK_00301.tar.zst.sha256 UKK_00150.tar.zst.sha256)'
+check "case package contains case folder"  '[[ "$(tar -tf $DL/UKK_00301.tar.zst --use-compress-program=zstd | head -1)" == "UKK_00301/" ]]'
+check "manifest lists both cases"          '[[ $(jq ".cases | length" $DL/manifest.json) -eq 2 ]]'
 check "requests folder emptied"            '[[ -z "$(ls $DEG_PATH/UKF/requests)" ]]'
 check "failed requests archived"           '[[ $(ls $DEG_PATH/UKF/archived-requests | grep -c FAILED) -eq 2 ]]'
 check "two distinct error messages"        '[[ $(msgs UKF fetch_error) -eq 2 ]]'
-check "ready message lists skipped id"     'jq -e ".skipped_ids == [\"UKK_00999\"]" $DEG_PATH/UKF/messages/*fetch_ready* >/dev/null'
+check "ready message lists skipped id"     'jq -e ".skipped_ids == [\"UKK_00999\"] and .download_folder == \"download/UKF_fetch_2026-09-24_00\"" $DEG_PATH/UKF/messages/*fetch_ready* >/dev/null'
 run "$FETCH" fetch2
 check "second cycle writes no new errors"  '[[ $(msgs UKF fetch_error) -eq 2 ]]'
 
-echo "# download expiry"
-age '50 hours ago' "$DEG_PATH/UKF/download"/*
-run "$FETCH" fetch3
-check "downloads older than 48h removed"   '[[ -z "$(ls $DEG_PATH/UKF/download)" ]]'
-check "expired message written"            '[[ $(msgs UKF fetch_expired) -eq 1 ]]'
+echo "# size limits and DEG space"
+echo '{"organization":"UKF","requested_ids":["UKK_00301","UKK_00150"]}' > "$DEG_PATH/UKF/requests/request_2026-09-24_03.json"
+FETCH_MAX_CASE_SIZE=10K run "$FETCH" fetch_case_limit
+check "all cases too large -> error"       'grep -q "exceed the per-case limit" $DEG_PATH/UKF/messages/*fetch_error_request_2026-09-24_03*'
+echo '{"organization":"UKF","requested_ids":["UKK_00301","UKK_00150"]}' > "$DEG_PATH/UKF/requests/request_2026-09-24_04.json"
+FETCH_MAX_SIZE=30K run "$FETCH" fetch_total_limit
+check "total too large -> error"           'grep -q "Request too large" $DEG_PATH/UKF/messages/*fetch_error_request_2026-09-24_04*'
+echo '{"organization":"UKF","requested_ids":["UKK_00301","UKK_00150"]}' > "$DEG_PATH/UKF/requests/request_2026-09-24_05.json"
+DEG_CAPACITY_BYTES=100K DEG_SPACE_MARGIN=1K run "$FETCH" fetch_deg_full
+check "DEG full -> error, nothing built"   'grep -q "Not enough space on the DEG" $DEG_PATH/UKF/messages/*fetch_error_request_2026-09-24_05* && [[ ! -d $DEG_PATH/UKF/download/UKF_fetch_2026-09-24_05 ]]'
+echo '{"organization":"UKF","requested_ids":["UKK_00301","UKK_00150"]}' > "$DEG_PATH/UKF/requests/request_2026-09-24_06.json"
+DEG_CAPACITY_BYTES=100M DEG_SPACE_MARGIN=1K run "$FETCH" fetch_deg_ok
+check "capacity mode with room -> ready"   '[[ -f $DEG_PATH/UKF/download/UKF_fetch_2026-09-24_06/manifest.json ]]'
+
+echo "# DEG cleanup"
+age '50 hours ago' "$DEG_PATH/UKF/download/UKF_fetch_2026-09-24_00"/* "$DEG_PATH/UKF/upload/badname.tar.zst.rejected"
+mkdir -p "$DEG_PATH/UKF/upload/UKF_2026-09-24_99"; age '2 hours ago' "$DEG_PATH/UKF/upload/UKF_2026-09-24_99"
+echo keep > "$DEG_PATH/UKF/upload/fresh.tar.zst"
+DEG_REQUIRE_MOUNTPOINT=1 "$CLEANUP" --force > "$T/cleanup_refused.log" 2>&1; rc=$?
+check "cleanup refuses non-mountpoint"     '[[ $rc -ne 0 && -f $DEG_PATH/UKF/download/UKF_fetch_2026-09-24_00/manifest.json ]]'
+"$CLEANUP" --dry-run > "$T/cleanup_dry.log" 2>&1
+check "dry-run removes nothing"            '[[ -f $DEG_PATH/UKF/download/UKF_fetch_2026-09-24_00/manifest.json ]] && grep -q "would remove" $T/cleanup_dry.log'
+"$CLEANUP" --force > "$T/cleanup.log" 2>&1
+check "old download folder removed"        '[[ ! -e $DEG_PATH/UKF/download/UKF_fetch_2026-09-24_00 ]]'
+check "recent download folder kept"        '[[ -f $DEG_PATH/UKF/download/UKF_fetch_2026-09-24_06/manifest.json ]]'
+check "old rejected upload removed"        '[[ ! -e $DEG_PATH/UKF/upload/badname.tar.zst.rejected ]]'
+check "fresh upload kept"                  '[[ -f $DEG_PATH/UKF/upload/fresh.tar.zst ]]'
+check "empty old package folder removed"   '[[ ! -e $DEG_PATH/UKF/upload/UKF_2026-09-24_99 ]]'
+check "expired messages written"           '[[ $(msgs UKF fetch_expired) -eq 1 && $(msgs UKF upload_expired) -eq 1 ]]'
+"$CLEANUP" > "$T/cleanup_throttled.log" 2>&1
+check "second run throttled"               '! grep -q "cleanup started" $T/cleanup_throttled.log'
+rm -f "$DEG_PATH/UKF/upload/fresh.tar.zst"
 
 echo "# staging"
 check "staging clean after cycles"         '[[ -z "$(find $LOCAL_STAGING_PATH/deploy $LOCAL_STAGING_PATH/fetch -type f)" ]]'

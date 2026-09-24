@@ -11,6 +11,7 @@ source "${PROCESS_DIR}/config.sh"
 source "${PROCESS_DIR}/logging.sh"
 source "${PROCESS_DIR}/validation.sh"
 source "${PROCESS_DIR}/messages.sh"
+source "${PROCESS_DIR}/space.sh"
 
 ensure_directories() {
   mkdir -p "${FETCH_STAGING_PATH}"
@@ -158,10 +159,6 @@ process_request() {
     return 1
   fi
 
-  local ids_str
-  ids_str=$(printf '%s, ' "${valid_ids[@]}")
-  ids_str="${ids_str%, }"
-
   local missing_str=""
   local missing_json="[]"
   if [[ ${#missing_ids[@]} -gt 0 ]]; then
@@ -171,125 +168,173 @@ process_request() {
     log_warn "Some requested IDs not found in data lake (skipped): ${missing_str}"
   fi
 
+  local base_name="${filename%.json}"
+  local package_name="${org}_fetch_${base_name#request_}"
+  local staging_dir="${FETCH_STAGING_PATH}/${package_name}"
+  local download_dir="${DEG_PATH}/${org}/download/${package_name}"
+
+  # Helper: report an error, archive the request, give up
+  fail_request() {
+    local reason="$1" status="$2" extra="${3:-{\}}"
+    log_error "${reason}"
+    write_message "$org" "$(jq -n \
+      --arg file "$filename" \
+      --arg reason "$reason" \
+      --argjson extra "$extra" \
+      --arg ts "$(now_iso)" \
+      '{type: "fetch", status: "error", request_file: $file, error: $reason, timestamp: $ts} + $extra')" \
+      "fetch" "error" "${base_name}"
+    rm -rf "$staging_dir"
+    archive_request "$request_file" "$org" "failed"
+    finalize_package_log "$status"
+  }
+
+  # Step 2: Size checks from the data lake folder sizes, before anything is copied
+  local max_case_bytes max_total_bytes
+  max_case_bytes=$(numfmt --from=iec "${FETCH_MAX_CASE_SIZE}")
+  max_total_bytes=$(numfmt --from=iec "${FETCH_MAX_SIZE}")
+
+  local included_ids=() too_large_ids=()
+  local total_bytes=0 largest_bytes=0
+  declare -A case_bytes
+  for exam_id in "${valid_ids[@]}"; do
+    local src size
+    src="${DATA_PATH}/${exam_id:0:3}/$(get_shard_dir "$exam_id")/${exam_id}"
+    size=$(dir_bytes "$src")
+    if [[ "$size" -gt "$max_case_bytes" ]]; then
+      log_warn "Case exceeds per-case limit, skipped: ${exam_id} ($(human "$size") > ${FETCH_MAX_CASE_SIZE})"
+      too_large_ids+=("$exam_id")
+      continue
+    fi
+    case_bytes[$exam_id]=$size
+    included_ids+=("$exam_id")
+    total_bytes=$((total_bytes + size))
+    [[ "$size" -gt "$largest_bytes" ]] && largest_bytes=$size
+  done
+
+  local too_large_json
+  too_large_json=$(printf '%s\n' "${too_large_ids[@]}" | grep -v '^$' | jq -R . | jq -sc .)
+  local extra_json
+  extra_json=$(jq -nc --argjson skipped "$missing_json" --argjson large "$too_large_json" '{skipped_ids: $skipped, too_large_ids: $large}')
+
+  if [[ ${#included_ids[@]} -eq 0 ]]; then
+    fail_request "All requested cases exceed the per-case limit of ${FETCH_MAX_CASE_SIZE}" "failed_size_limit" "$extra_json"
+    return 1
+  fi
+  if [[ "$total_bytes" -gt "$max_total_bytes" ]]; then
+    fail_request "Request too large: $(human "$total_bytes") exceeds the limit of ${FETCH_MAX_SIZE}. Split it into several requests." "failed_size_limit" "$extra_json"
+    return 1
+  fi
+
+  # DEG free space (see space.sh: real "df" or configured capacity)
+  local deg_free margin
+  deg_free=$(deg_free_bytes)
+  margin=$(numfmt --from=iec "${DEG_SPACE_MARGIN}")
+  if [[ $((total_bytes + margin)) -gt "$deg_free" ]]; then
+    fail_request "Not enough space on the DEG for this request: needs $(human "$total_bytes"), free $(human "$deg_free"). Download and delete existing packages, or resubmit later." "failed_deg_space" "$extra_json"
+    log_json "\"action\": \"space_check\", \"file\": \"${filename}\", \"result\": \"deg_full\", \"needed\": ${total_bytes}, \"free\": ${deg_free}"
+    return 1
+  fi
+
+  # Local staging: one case at a time (folder copy + archive)
+  local local_free
+  local_free=$(free_bytes "${FETCH_STAGING_PATH}")
+  if [[ $((largest_bytes * 2 + margin)) -gt "$local_free" ]]; then
+    fail_request "Hub staging area is full ($(human "$local_free") free), please resubmit later" "failed_local_space" "$extra_json"
+    log_json "\"action\": \"space_check\", \"file\": \"${filename}\", \"result\": \"staging_full\", \"needed\": $((largest_bytes * 2)), \"free\": ${local_free}"
+    return 1
+  fi
+
   # Acknowledge request
   local ids_json
-  ids_json=$(printf '%s\n' "${valid_ids[@]}" | jq -R . | jq -s .)
+  ids_json=$(printf '%s\n' "${included_ids[@]}" | jq -R . | jq -sc .)
   write_message "$org" "$(jq -n \
     --arg file "$filename" \
     --argjson ids "$ids_json" \
     --argjson skipped "$missing_json" \
-    --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
-    '{type: "fetch", status: "received", request_file: $file, requested_ids: $ids, skipped_ids: $skipped, timestamp: $ts}')" \
-    "fetch" "received" "${filename%.json}"
+    --argjson large "$too_large_json" \
+    --arg ts "$(now_iso)" \
+    '{type: "fetch", status: "received", request_file: $file, requested_ids: $ids, skipped_ids: $skipped, too_large_ids: $large, timestamp: $ts}')" \
+    "fetch" "received" "${base_name}"
 
-  log_json "\"action\": \"validate_request\", \"file\": \"${filename}\", \"org\": \"${req_org}\", \"ids\": \"${ids_str}\", \"skipped\": \"${missing_str}\", \"result\": \"valid\", \"ack\": \"written\""
+  log_json "\"action\": \"validate_request\", \"file\": \"${filename}\", \"org\": \"${req_org}\", \"ids\": ${ids_json}, \"skipped\": ${missing_json}, \"too_large\": ${too_large_json}, \"total_bytes\": ${total_bytes}, \"result\": \"valid\", \"ack\": \"written\""
 
-  # Step 2: Assemble package on local hub staging
-  local base_name="${filename%.json}"
-  local archive_name="${org}_fetch_${base_name#request_}.tar.zst"
-  local staging_dir="${FETCH_STAGING_PATH}/fetch_${base_name}"
-  local archive_path="${FETCH_STAGING_PATH}/${archive_name}"
-
+  # Step 3: One package per case: copy from data lake, archive, checksum, transfer.
+  # Processing case by case keeps local staging usage at about two cases.
   mkdir -p "$staging_dir"
-
-  for exam_id in "${valid_ids[@]}"; do
-    local exam_org="${exam_id:0:3}"
-    local shard_dir
-    shard_dir=$(get_shard_dir "$exam_id")
-    local src="${DATA_PATH}/${exam_org}/${shard_dir}/${exam_id}"
-    if ! rsync -a "$src" "$staging_dir/"; then
-      log_error "rsync from data lake failed: ${exam_id}"
-      rm -rf "$staging_dir"
-      write_message "$org" "$(jq -n \
-        --arg file "$filename" \
-        --arg id "$exam_id" \
-        --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
-        '{type: "fetch", status: "error", request_file: $file, error: ("Could not read " + $id + " from the data lake, please resubmit the request later"), timestamp: $ts}')" \
-        "fetch" "error" "${filename%.json}"
-      archive_request "$request_file" "$org" "failed"
-      finalize_package_log "failed_transfer"
-      return 1
-    fi
-  done
-
-  # Create archive locally on hub
-  tar -cf "$archive_path" --use-compress-program=zstd -C "$staging_dir" .
-  rm -rf "$staging_dir"
-
-  # Check size limit
-  local archive_size
-  archive_size=$(stat -c %s "$archive_path" 2>/dev/null || echo 0)
-  local max_bytes
-  max_bytes=$(numfmt --from=iec "${FETCH_MAX_SIZE}" 2>/dev/null || echo 0)
-
-  if [[ "$archive_size" -gt "$max_bytes" ]]; then
-    local human_size
-    human_size=$(numfmt --to=iec "$archive_size")
-    log_error "Package too large (${human_size} > ${FETCH_MAX_SIZE}): ${archive_name}"
-    write_message "$org" "$(jq -n \
-      --arg file "$filename" \
-      --arg size "$human_size" \
-      --arg max "${FETCH_MAX_SIZE}" \
-      --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
-      '{type: "fetch", status: "error", request_file: $file, error: ("Package too large: " + $size + " exceeds limit " + $max), timestamp: $ts}')" \
-      "fetch" "error" "${filename%.json}"
-    log_json "\"action\": \"assemble_package\", \"file\": \"${archive_name}\", \"result\": \"too_large\", \"size\": \"${archive_size}\", \"max\": \"${max_bytes}\""
-    rm -f "$archive_path"
-    archive_request "$request_file" "$org" "failed"
-    finalize_package_log "failed_size_limit"
-    return 1
-  fi
-
-  # Generate checksum (format: "hash  filename" for sha256sum -c compatibility)
-  (cd "$FETCH_STAGING_PATH" && sha256sum "$archive_name") > "${archive_path}.sha256"
-
-  local human_size
-  human_size=$(numfmt --to=iec "$archive_size")
-
-  log_json "\"action\": \"assemble_package\", \"file\": \"${archive_name}\", \"result\": \"success\", \"size_bytes\": ${archive_size}, \"size\": \"${human_size}\", \"exams\": ${#valid_ids[@]}"
-
-  # Step 3: Transfer to DEG
-  local download_dir="${DEG_PATH}/${org}/download"
   mkdir -p "$download_dir"
 
+  local manifest_entries=()
   local transfer_start
   transfer_start=$(date +%s)
 
-  if ! rsync -a "$archive_path" "${download_dir}/${archive_name}"; then
-    log_error "Transfer to DEG failed: ${archive_name}"
-    log_json "\"action\": \"transfer_to_deg\", \"file\": \"${archive_name}\", \"result\": \"failed\""
-    rm -f "$archive_path" "${archive_path}.sha256" "${download_dir}/${archive_name}"
-    write_message "$org" "$(jq -n \
-      --arg file "$filename" \
-      --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
-      '{type: "fetch", status: "error", request_file: $file, error: "Transfer of the package to the DEG failed, please resubmit the request later", timestamp: $ts}')" \
-      "fetch" "error" "${filename%.json}"
-    archive_request "$request_file" "$org" "failed"
-    finalize_package_log "failed_transfer"
-    return 1
-  fi
-  cp "${archive_path}.sha256" "${download_dir}/${archive_name}.sha256"
+  for exam_id in "${included_ids[@]}"; do
+    local src archive_name archive_path archive_size
+    src="${DATA_PATH}/${exam_id:0:3}/$(get_shard_dir "$exam_id")/${exam_id}"
+    archive_name="${exam_id}.tar.zst"
+    archive_path="${staging_dir}/${archive_name}"
 
-  local transfer_end
-  transfer_end=$(date +%s)
-  local transfer_duration=$((transfer_end - transfer_start))
+    if ! rsync -a "$src" "${staging_dir}/"; then
+      rm -rf "$download_dir"
+      fail_request "Could not read ${exam_id} from the data lake, please resubmit the request later" "failed_transfer" "$extra_json"
+      return 1
+    fi
+    if ! tar -cf "$archive_path" --use-compress-program=zstd -C "$staging_dir" "$exam_id"; then
+      rm -rf "$download_dir"
+      fail_request "Could not create package for ${exam_id}" "failed_archive" "$extra_json"
+      return 1
+    fi
+    rm -rf "${staging_dir:?}/${exam_id}"
+    (cd "$staging_dir" && sha256sum "$archive_name") > "${archive_path}.sha256"
+    archive_size=$(stat -c %s "$archive_path")
 
-  log_json "\"action\": \"transfer_to_deg\", \"file\": \"${archive_name}\", \"result\": \"success\", \"duration_s\": ${transfer_duration}, \"size_bytes\": ${archive_size}, \"size\": \"${human_size}\""
+    if ! rsync -a "$archive_path" "${download_dir}/${archive_name}" || ! cp "${archive_path}.sha256" "${download_dir}/${archive_name}.sha256"; then
+      rm -rf "$download_dir"
+      fail_request "Transfer of ${archive_name} to the DEG failed, please resubmit the request later" "failed_transfer" "$extra_json"
+      log_json "\"action\": \"transfer_to_deg\", \"file\": \"${archive_name}\", \"result\": \"failed\""
+      return 1
+    fi
+
+    manifest_entries+=("$(jq -nc \
+      --arg id "$exam_id" \
+      --arg file "$archive_name" \
+      --argjson stored "${case_bytes[$exam_id]}" \
+      --argjson archive "$archive_size" \
+      --arg sha "$(awk '{print $1}' "${archive_path}.sha256")" \
+      '{id: $id, file: $file, size_bytes: $stored, archive_bytes: $archive, sha256: $sha}')")
+    rm -f "$archive_path" "${archive_path}.sha256"
+
+    log_json "\"action\": \"transfer_to_deg\", \"file\": \"${archive_name}\", \"result\": \"success\", \"size_bytes\": ${archive_size}, \"size\": \"$(human "$archive_size")\""
+  done
+
+  local transfer_duration=$(( $(date +%s) - transfer_start ))
+  local manifest_json
+  manifest_json=$(printf '%s\n' "${manifest_entries[@]}" | jq -s .)
+  jq -n \
+    --arg pkg "$package_name" \
+    --arg file "$filename" \
+    --argjson cases "$manifest_json" \
+    --argjson skipped "$missing_json" \
+    --argjson large "$too_large_json" \
+    --arg ts "$(now_iso)" \
+    '{package: $pkg, request_file: $file, created: $ts, cases: $cases, skipped_ids: $skipped, too_large_ids: $large}' \
+    > "${download_dir}/manifest.json"
+  rm -rf "$staging_dir"
+
+  log_json "\"action\": \"assemble_package\", \"package\": \"${package_name}\", \"result\": \"success\", \"cases\": ${#included_ids[@]}, \"total_bytes\": ${total_bytes}, \"duration_s\": ${transfer_duration}"
 
   # Step 4: Notify partner and archive request
   write_message "$org" "$(jq -n \
     --arg file "$filename" \
-    --arg dl_file "$archive_name" \
+    --arg folder "download/${package_name}" \
     --argjson ids "$ids_json" \
     --argjson skipped "$missing_json" \
-    --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
-    '{type: "fetch", status: "ready", request_file: $file, download_file: $dl_file, included_ids: $ids, skipped_ids: $skipped, timestamp: $ts}')" \
-    "fetch" "ready" "${filename%.json}"
+    --argjson large "$too_large_json" \
+    --arg ts "$(now_iso)" \
+    '{type: "fetch", status: "ready", request_file: $file, download_folder: $folder, included_ids: $ids, skipped_ids: $skipped, too_large_ids: $large, timestamp: $ts}')" \
+    "fetch" "ready" "${base_name}"
 
   archive_request "$request_file" "$org" "ok"
-
-  # Step 5: Finalize — clean up temp files
-  rm -f "$archive_path" "${archive_path}.sha256"
 
   finalize_package_log "success"
   return 0
@@ -317,40 +362,8 @@ run_fetch_cycle() {
     shopt -u nullglob
   done
 
-  # Download expiry cleanup — only remove fetch archives we created
-  for org in ${ORGANIZATIONS}; do
-    local download_dir="${DEG_PATH}/${org}/download"
-    if [[ ! -d "$download_dir" ]]; then
-      continue
-    fi
-
-    local expired_count=0
-    local expired_names=()
-    while IFS= read -r expired_file; do
-      expired_names+=("$(basename "$expired_file")")
-      rm -f "$expired_file"
-      # Also remove the companion .sha256 if the archive is being removed, or vice versa
-      if [[ "$expired_file" == *.tar.zst ]]; then
-        rm -f "${expired_file}.sha256"
-      fi
-      expired_count=$((expired_count + 1))
-    done < <(find "$download_dir" -maxdepth 1 -type f \( -name '*_fetch_*.tar.zst' -o -name '*_fetch_*.tar.zst.sha256' \) -mmin +"$((DOWNLOAD_EXPIRY_HOURS * 60))")
-
-    if [[ "$expired_count" -gt 0 ]]; then
-      local names_str
-      names_str=$(printf '%s, ' "${expired_names[@]}")
-      names_str="${names_str%, }"
-      log_info "Removed ${expired_count} expired download(s) for ${org}"
-      write_message "$org" "$(jq -n \
-        --arg count "$expired_count" \
-        --arg hours "${DOWNLOAD_EXPIRY_HOURS}" \
-        --arg files "$names_str" \
-        --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
-        '{type: "fetch", status: "expired", files_removed: ($count | tonumber), files: $files, message: ("Removed after " + $hours + " hours"), timestamp: $ts}')" \
-        "fetch" "expired"
-      log_json "\"action\": \"expiry_cleanup\", \"org\": \"${org}\", \"files_removed\": ${expired_count}, \"files\": \"${names_str}\""
-    fi
-  done
+  # Stale data on the DEG (self-throttled, see CLEANUP_INTERVAL)
+  "${PROCESS_DIR}/cleanup/cleanup-deg.sh" || log_error "DEG cleanup failed"
 
   log_info "Fetch processing cycle complete"
 }

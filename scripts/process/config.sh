@@ -30,20 +30,25 @@ STATE_PATH="${LOCAL_STAGING_PATH}/state"   # small bookkeeping files, survives r
 
 # Timing (in seconds)
 DEPLOY_LOOP_INTERVAL=10    # How often to check for new uploads (10s for testing)
-STABILITY_THRESHOLD=60     # File must be unchanged for this long (60s for testing)
+STABILITY_THRESHOLD="${STABILITY_THRESHOLD:-60}"     # File must be unchanged for this long (60s for testing)
 
 # Fetch settings
 FETCH_LOOP_INTERVAL=30     # How often to check for new fetch requests (seconds)
-FETCH_MAX_SIZE="20G"       # Maximum total (uncompressed) size of one fetch request
-FETCH_MAX_CASE_SIZE="4G"   # Maximum (uncompressed) size of a single case package; larger cases are skipped
-DOWNLOAD_EXPIRY_HOURS=48   # Hours after which download packages are auto-deleted
+FETCH_MAX_SIZE="${FETCH_MAX_SIZE:-20G}"       # Maximum total (uncompressed) size of one fetch request
+FETCH_MAX_CASE_SIZE="${FETCH_MAX_CASE_SIZE:-4G}"   # Maximum (uncompressed) size of a single case package; larger cases are skipped
+
+# DEG cleanup (scripts/process/cleanup/cleanup-deg.sh, run from the fetch loop)
+UPLOAD_EXPIRY_HOURS=48         # Remove files in [ORG]/upload/ older than this (stale, rejected, mismatched)
+DOWNLOAD_EXPIRY_HOURS=48       # Remove files in [ORG]/download/ older than this
+EMPTY_FOLDER_EXPIRY_MINUTES=60 # Remove empty package folders older than this
+CLEANUP_INTERVAL=600           # Seconds between cleanup runs
 
 # Disk space
 # DEG capacity for the free-space check. Leave empty to trust "df" on the DEG mount
 # (only correct if the WebDAV server reports quota); otherwise set e.g. "500G" and
 # the hub computes free space as capacity minus the files in all upload/download folders.
-DEG_CAPACITY_BYTES=""
-DEG_SPACE_MARGIN="1G"      # Always keep at least this much free on the DEG
+DEG_CAPACITY_BYTES="${DEG_CAPACITY_BYTES:-}"
+DEG_SPACE_MARGIN="${DEG_SPACE_MARGIN:-1G}"      # Always keep at least this much free on the DEG
 STAGING_SPACE_FACTOR=4     # Local staging must have this many times the archive size free
 
 # Supported archive extensions
