@@ -11,6 +11,7 @@ source "${PROCESS_DIR}/config.sh"
 source "${PROCESS_DIR}/logging.sh"
 source "${PROCESS_DIR}/validation.sh"
 source "${PROCESS_DIR}/messages.sh"
+source "${PROCESS_DIR}/space.sh"
 
 ensure_directories() {
   mkdir -p "${DEPLOY_STAGING_PATH}"
@@ -95,14 +96,28 @@ process_archive() {
   local archive_file="$1"
   local org="$2"
   local source_label="$3"
+  local kind="${4:-batch}"   # "batch" (ORG_YYYY-MM-DD_NN) or "case" (ORG_NNNNN)
   local filename
   filename=$(basename "$archive_file")
   local base_name
   base_name=$(strip_archive_ext "$filename")
 
+  local archive_size
+  archive_size=$(stat -c %s "$archive_file" 2>/dev/null || echo 0)
+
+  # Local staging needs room for the archive copy plus its extracted content.
+  # Not enough: leave the archive on the DEG and try again next cycle.
+  local needed=$((archive_size * STAGING_SPACE_FACTOR))
+  local avail
+  avail=$(free_bytes "${DEPLOY_STAGING_PATH}")
+  if [[ "$avail" -lt "$needed" ]]; then
+    log_error "Not enough local staging space for ${filename}: need $(human "$needed"), have $(human "$avail"). Waiting."
+    return 1
+  fi
+
   init_package_log "upload_${base_name}"
 
-  log_json "\"action\": \"start_processing\", \"file\": \"${archive_file}\", \"source\": \"${source_label}\", \"size\": \"$(stat -c %s "$archive_file" 2>/dev/null || echo 0)\""
+  log_json "\"action\": \"start_processing\", \"file\": \"${archive_file}\", \"source\": \"${source_label}\", \"kind\": \"${kind}\", \"size\": \"${archive_size}\""
 
   # Step 1: Copy archive from source (DEG/FS) to local hub staging
   local local_archive="${DEPLOY_STAGING_PATH}/${filename}"
@@ -198,6 +213,17 @@ process_archive() {
 
   log_info "Processing complete: ${#stored[@]} stored, ${#skipped[@]} skipped (existing), ${#invalid[@]} invalid, ${#failed[@]} failed"
 
+  # A per-case package is expected to contain exactly the case it is named after.
+  # Anything else is still stored (the content decides), but flagged.
+  if [[ "$kind" == "case" ]]; then
+    local found
+    found=$(printf '%s\n' "${stored[@]}" "${skipped[@]}" | grep -v '^$' | sort | tr '\n' ' ')
+    if [[ "$found" != "${base_name} " ]]; then
+      log_warn "Case package ${filename} contains [${found% }] instead of ${base_name}"
+      log_json "\"action\": \"case_package_check\", \"file\": \"${filename}\", \"result\": \"content_mismatch\", \"found\": \"${found% }\""
+    fi
+  fi
+
   # Step 4: Clean up staging directory
   rm -rf "$staging_dir"
 
@@ -281,9 +307,12 @@ process_org_source() {
     return 0
   fi
 
+  # Archives directly in upload/ and inside one level of package folders
+  # (upload/ORG_YYYY-MM-DD_NN/ORG_NNNNN.tar.zst). Package folders are only a
+  # grouping convenience; every archive is handled on its own.
   shopt -s nullglob
   for ext in ${ARCHIVE_EXTENSIONS}; do
-    for archive_file in "${upload_path}"/*.${ext}; do
+    for archive_file in "${upload_path}"/*.${ext} "${upload_path}"/*/*.${ext}; do
       if [[ ! -f "$archive_file" ]]; then
         continue
       fi
@@ -293,10 +322,17 @@ process_org_source() {
       local base_check
       base_check=$(strip_archive_ext "$filename")
 
-      if ! [[ "$base_check" =~ ^[A-Z]{3}_[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}$ ]]; then
+      local kind=""
+      if [[ "$base_check" =~ ^[A-Z]{3}_[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}$ ]]; then
+        kind="batch"
+      elif [[ "$base_check" =~ ^[A-Z]{3}_[0-9]{5}$ ]]; then
+        kind="case"
+      fi
+
+      if [[ -z "$kind" ]]; then
         if is_file_stable "$archive_file"; then
           reject_upload "$archive_file" "$org" "$source_label" \
-            "Invalid file name: ${filename} (expected: ORG_YYYY-MM-DD_NN.tar.zst)"
+            "Invalid file name: ${filename} (expected: ORG_NNNNN.tar.zst for one case, or ORG_YYYY-MM-DD_NN.tar.zst for a batch)"
         else
           log_debug "Invalid name, still uploading: ${filename}"
         fi
@@ -311,7 +347,7 @@ process_org_source() {
           log_info "Found archive with valid checksum: ${filename} (${source_label})"
           log_json "\"action\": \"checksum_verify\", \"file\": \"${filename}\", \"source\": \"${source_label}\", \"result\": \"pass\""
           rm -f "${archive_file}.sha256.mismatch"
-          process_archive "$archive_file" "$org" "$source_label" || true
+          process_archive "$archive_file" "$org" "$source_label" "$kind" || true
         elif is_file_stable "$archive_file"; then
           mark_checksum_mismatch "$archive_file" "$org" "$source_label"
         else
@@ -330,7 +366,7 @@ process_org_source() {
       if is_file_stable "$archive_file"; then
         log_info "Found stable archive (no checksum): ${filename} (${source_label})"
         log_json "\"action\": \"stability_check\", \"file\": \"${filename}\", \"source\": \"${source_label}\", \"result\": \"stable\""
-        process_archive "$archive_file" "$org" "$source_label" || true
+        process_archive "$archive_file" "$org" "$source_label" "$kind" || true
       else
         log_debug "Archive still uploading (not stable): ${filename}"
       fi

@@ -34,8 +34,17 @@ STABILITY_THRESHOLD=60     # File must be unchanged for this long (60s for testi
 
 # Fetch settings
 FETCH_LOOP_INTERVAL=30     # How often to check for new fetch requests (seconds)
-FETCH_MAX_SIZE="20G"       # Maximum total size of a single download package
+FETCH_MAX_SIZE="20G"       # Maximum total (uncompressed) size of one fetch request
+FETCH_MAX_CASE_SIZE="4G"   # Maximum (uncompressed) size of a single case package; larger cases are skipped
 DOWNLOAD_EXPIRY_HOURS=48   # Hours after which download packages are auto-deleted
+
+# Disk space
+# DEG capacity for the free-space check. Leave empty to trust "df" on the DEG mount
+# (only correct if the WebDAV server reports quota); otherwise set e.g. "500G" and
+# the hub computes free space as capacity minus the files in all upload/download folders.
+DEG_CAPACITY_BYTES=""
+DEG_SPACE_MARGIN="1G"      # Always keep at least this much free on the DEG
+STAGING_SPACE_FACTOR=4     # Local staging must have this many times the archive size free
 
 # Supported archive extensions
 ARCHIVE_EXTENSIONS="zip tar.gz tar.zst"

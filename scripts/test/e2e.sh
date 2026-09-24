@@ -37,6 +37,20 @@ check "source archives deleted"            '[[ -z "$(find $DEG_PATH/UKF/upload $
 check "stored message written"             '[[ $(msgs UKF upload_stored) -eq 1 ]]'
 check "invalid folder listed in message"   'jq -e ".invalid_folders == [\"UKF_99999x\"]" $DEG_PATH/UKF/messages/*upload_stored* >/dev/null'
 
+echo "# per-case packages: package folder, loose case file, case with mismatching content"
+mkdir -p "$DEG_PATH/UKF/upload/UKF_2026-09-24_10"
+mkpkg "$DEG_PATH/UKF/upload/UKF_2026-09-24_10" UKF_00201 UKF_00201
+mkpkg "$DEG_PATH/UKF/upload/UKF_2026-09-24_10" UKF_00202 UKF_00202
+mkpkg "$DEG_PATH/UKF/upload" UKF_00203 UKF_00203
+mkpkg "$DEG_PATH/UKF/upload" UKF_00204 UKF_00205
+run "$DEPLOY" deploy_case
+check "cases from package folder stored"   '[[ -d $DATA_LAKE_PATH/Data/UKF/00200/UKF_00201 && -d $DATA_LAKE_PATH/Data/UKF/00200/UKF_00202 ]]'
+check "loose case file stored"             '[[ -d $DATA_LAKE_PATH/Data/UKF/00200/UKF_00203 ]]'
+check "content mismatch stored but warned" '[[ -d $DATA_LAKE_PATH/Data/UKF/00200/UKF_00205 ]] && grep -q content_mismatch $T/deploy_case.log'
+check "package folder emptied, kept"       '[[ -d $DEG_PATH/UKF/upload/UKF_2026-09-24_10 && -z "$(ls -A $DEG_PATH/UKF/upload/UKF_2026-09-24_10)" ]]'
+check "one stored message per case"        '[[ $(msgs UKF upload_stored_UKF_0020) -eq 4 ]]'
+rmdir "$DEG_PATH/UKF/upload/UKF_2026-09-24_10"
+
 echo "# checksum mismatch: wait while fresh, mark when stable, accept corrected checksum"
 mkpkg "$DEG_PATH/UKF/upload" UKF_2026-09-24_01 UKF_00050
 cp "$DEG_PATH/UKF/upload/UKF_2026-09-24_01.tar.zst.sha256" "$T/good.sha256"
