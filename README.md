@@ -300,6 +300,9 @@ Local staging (`LOCAL_STAGING_PATH`) needs room for roughly three copies of the 
   "generated": "2026-09-24T15:26:39Z",
   "case_count": 1234,
   "total_bytes": 987654321,
+  "by_org": [
+    {"org": "UKF", "case_count": 800, "total_bytes": 654321000, "added_last_30d": 25, "last_added_at": "2026-09-24T15:26:39Z"}
+  ],
   "cases": [
     {"id": "UKF_00042", "org": "UKF", "shard": "00000", "size_bytes": 20480, "file_count": 12,
      "added_at": "2026-09-24T15:26:39Z", "updated_at": null, "source": "deg", "package": "UKF_00042.tar.zst"}
@@ -307,7 +310,7 @@ Local staging (`LOCAL_STAGING_PATH`) needs room for roughly three copies of the 
 }
 ```
 
-`size_bytes` is the uncompressed size as stored. The deploy loop adds entries after every stored package and publishes the index as `index.json` and `index.csv` into every `[ORG]/` folder on the DEG at the end of the cycle, so partners can look up which cases exist before writing fetch requests. The nightly `rebuild-index.sh` walks the data lake and picks up cases that were injected directly, keeping `added_at`, `source` and `package` of known cases (folder mtime and `unknown` for new ones). Run it by hand after a direct injection:
+`size_bytes` is the uncompressed size as stored. `by_org` is the overview per organization (alphabetical; every configured organization is listed, also those without a case yet). The deploy loop adds entries after every stored package and publishes the index as `index.json` and `index.csv` into every `[ORG]/` folder on the DEG at the end of the cycle, so partners can look up which cases exist before writing fetch requests. Next to them it publishes `overview.html` ("PRECISE Data Lake Overview"): totals, a timestamp and the contributions per organization as a page for the browser (print to PDF from there if needed). The page lists only organizations that contributed, alphabetically and without a ranking. The nightly `rebuild-index.sh` walks the data lake and picks up cases that were injected directly, keeping `added_at`, `source` and `package` of known cases; for cases the index does not know it takes them from the package logs in `logs/`, and for cases without a log (direct injections) it uses the folder mtime and `unknown`. Run it by hand after a direct injection:
 
 ```bash
 /opt/precise-hub/scripts/process/index/rebuild-index.sh
@@ -323,7 +326,8 @@ Local staging (`LOCAL_STAGING_PATH`) needs room for roughly three copies of the 
 ├── download/            # one folder per fetch request with per-case packages and manifest.json
 ├── messages/            # status notifications from the hub
 ├── index.json           # data index (all cases in the data lake), published by the hub
-└── index.csv            # same as CSV
+├── index.csv            # same as CSV
+└── overview.html        # PRECISE Data Lake Overview: totals and contributions per organization
 ```
 
 ### Data Lake Layout

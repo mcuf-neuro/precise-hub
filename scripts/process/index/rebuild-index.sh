@@ -3,8 +3,9 @@
 # PRECISE Hub - Rebuild the data index from the data lake content
 #
 # Usage: rebuild-index.sh [--no-publish]
-# Walks Data/ORG/SHARD/ORG_NNNNN, keeps added_at/source/package of cases already
-# in the index, uses the folder mtime for cases the index does not know
+# Walks Data/ORG/SHARD/ORG_NNNNN. added_at/source/package come, in this order,
+# from the index (cases it already knows), from the package logs in LOG_PATH
+# (cases the deploy loop stored) or from the folder mtime with source "unknown"
 # (e.g. injected directly from local mass storage). Run by hand after direct
 # injections, or nightly via a systemd timer.
 # =============================================================================
@@ -24,9 +25,35 @@ PUBLISH=1
 
 log_info "Rebuilding data index from ${DATA_PATH}"
 
-known='{}'
+# id -> {added_at, source, package} of every case the deploy loop stored, from the
+# package logs (first "stored" entry per case wins).
+added_from_logs() {
+  [[ -d "${LOG_PATH}" ]] || { echo '{}'; return; }
+  find "${LOG_PATH}" -maxdepth 1 -name '*__upload_*.json.log' -print0 \
+    | xargs -0 -r jq -R -c '
+        (fromjson? // empty) as $e | input_filename as $f
+        | if $e.action == "start_processing" then
+            {f: $f, kind: "start", package: ($e.file | split("/") | last), source: $e.source}
+          elif $e.action == "store_exam_folder" and $e.result == "stored" then
+            {f: $f, kind: "stored", id: $e.folder, added_at: $e.time}
+          else empty end' 2>/dev/null \
+    | jq -s -c '
+        group_by(.f) | map(
+          (map(select(.kind == "start")) | first) as $start
+          | .[] | select(.kind == "stored")
+          | {id, added_at, source: ($start.source // "unknown"), package: ($start.package // "unknown")})
+        | sort_by(.added_at) | unique_by(.id)
+        | map({key: .id, value: .}) | from_entries'
+}
+
+# Cases known to the index win, except those with source "unknown", for which the
+# logs may know better.
+known=$(added_from_logs)
 if [[ -s "${INDEX_FILE}" ]]; then
-  known=$(jq -c '(.cases // []) | map({key: .id, value: .}) | from_entries' "${INDEX_FILE}")
+  known=$(jq -c --slurpfile idx "${INDEX_FILE}" '
+    . as $logs
+    | ($idx[0].cases // []) | map(select(.source != "unknown")) | map({key: .id, value: .}) | from_entries
+    | $logs + .' <<< "$known")
 fi
 
 entries_file=$(mktemp)
