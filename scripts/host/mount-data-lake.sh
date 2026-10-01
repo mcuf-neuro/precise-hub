@@ -22,8 +22,9 @@ MOUNT_UID=${MOUNT_UID:-1000}
 MOUNT_GID=${MOUNT_GID:-1000}
 
 mkdir -p "$MOUNT_POINT"
+# seal: SMB3 encryption in transit (the mount fails if the server does not support it)
 mount -t cifs "$TRUENAS_PATH" "$MOUNT_POINT" \
-  -o credentials="$CRED_FILE",vers=3.0,uid=$MOUNT_UID,gid=$MOUNT_GID,noperm
+  -o credentials="$CRED_FILE",vers=3.0,seal,uid=$MOUNT_UID,gid=$MOUNT_GID,noperm
 
 rm -f "$CRED_FILE"
 
