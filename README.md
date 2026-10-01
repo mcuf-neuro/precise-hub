@@ -265,8 +265,8 @@ The fetch loop runs continuously (default: every 30 seconds) and scans for new J
 **Processing steps:**
 1. Discover `.json` request files
 2. Parse, validate (known org, valid ID format, IDs exist in data lake)
-3. Size checks from the data lake folder sizes, before anything is copied: cases above `FETCH_MAX_CASE_SIZE` are skipped (`too_large_ids`), a total above `FETCH_MAX_SIZE` is rejected, and the request is rejected if the DEG or the local staging area lacks the space. Then write "received" message to `[ORG]/messages/`
-4. For each case: rsync from data lake to local staging (`/var/tmp/precise-hub/fetch/`), create `ORG_NNNNN.tar.zst` + `.sha256`, transfer both into `[ORG]/download/ORG_fetch_YYYY-MM-DD_NN/`. Finally write `manifest.json` there.
+3. Space checks from the data lake folder sizes, before anything is copied: the request is rejected if the DEG or the local staging area lacks the space. Then write "received" message to `[ORG]/messages/`
+4. For each case: rsync from data lake to local staging (`/var/tmp/precise-hub/fetch/`), create `ORG_NNNNN.tar.zst`, check its size (a package above `FETCH_MAX_CASE_SIZE` is skipped and listed in `too_large_ids`; the request fails once the packages exceed `FETCH_MAX_SIZE` in total), add `.sha256`, transfer both into `[ORG]/download/ORG_fetch_YYYY-MM-DD_NN/`. Finally write `manifest.json` there.
 5. Write "ready" message to `[ORG]/messages/`, archive request file to `[ORG]/archived-requests/`
 6. Write JSON log to `/mnt/data-lake/logs/`
 
@@ -359,8 +359,8 @@ Edit `scripts/process/config.sh` to adjust processing parameters. The mount poin
 | `STABILITY_THRESHOLD` | `60` | Seconds a file must be unchanged before a checksum mismatch or invalid name is declared (and before processing, if `REQUIRE_CHECKSUM=0`) |
 | `REQUIRE_CHECKSUM` | `1` | Process archives only with a matching `.sha256` file |
 | `MISSING_CHECKSUM_TIMEOUT_MINUTES` | `60` | Reject an archive that has had no checksum file for this long |
-| `FETCH_MAX_SIZE` | `20G` | Maximum total (uncompressed) size of one fetch request |
-| `FETCH_MAX_CASE_SIZE` | `4G` | Maximum (uncompressed) size of one case; larger cases are skipped |
+| `FETCH_MAX_SIZE` | `20G` | Maximum total size of the compressed packages of one fetch request |
+| `FETCH_MAX_CASE_SIZE` | `15G` | Maximum size of one compressed case package; larger cases are skipped |
 | `DEG_CAPACITY_BYTES` | `500G` | Space allotted to the hub on the DEG; free space is the smaller of `df` and this minus the files in upload/download |
 | `DEG_SPACE_MARGIN` | `1G` | Free space always kept on the DEG |
 | `STAGING_SPACE_FACTOR` | `4` | Local staging must have this many times the archive size free before an upload is processed |

@@ -42,8 +42,9 @@ MISSING_CHECKSUM_TIMEOUT_MINUTES=60
 
 # Fetch settings
 FETCH_LOOP_INTERVAL=30     # How often to check for new fetch requests (seconds)
-FETCH_MAX_SIZE="${FETCH_MAX_SIZE:-20G}"       # Maximum total (uncompressed) size of one fetch request
-FETCH_MAX_CASE_SIZE="${FETCH_MAX_CASE_SIZE:-4G}"   # Maximum (uncompressed) size of a single case package; larger cases are skipped
+# Size limits apply to the compressed packages (.tar.zst) as transferred via the DEG
+FETCH_MAX_SIZE="${FETCH_MAX_SIZE:-20G}"       # Maximum total size of the packages of one fetch request
+FETCH_MAX_CASE_SIZE="${FETCH_MAX_CASE_SIZE:-15G}"  # Maximum size of a single case package; larger cases are skipped
 
 # DEG cleanup (scripts/process/cleanup/cleanup-deg.sh, run from the fetch loop)
 UPLOAD_EXPIRY_HOURS=48         # Remove files in [ORG]/upload/ older than this (stale, rejected, mismatched)

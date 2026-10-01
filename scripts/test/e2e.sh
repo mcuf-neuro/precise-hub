@@ -121,7 +121,11 @@ FETCH_MAX_CASE_SIZE=10K run "$FETCH" fetch_case_limit
 check "all cases too large -> error"       'grep -q "exceed the per-case limit" $DEG_PATH/UKF/messages/*fetch_error_request_2026-09-24_03*'
 echo '{"organization":"UKF","requested_ids":["UKK_00301","UKK_00150"]}' > "$DEG_PATH/UKF/requests/request_2026-09-24_04.json"
 FETCH_MAX_SIZE=30K run "$FETCH" fetch_total_limit
-check "total too large -> error"           'grep -q "Request too large" $DEG_PATH/UKF/messages/*fetch_error_request_2026-09-24_04*'
+check "total too large -> error"           'grep -q "Request too large" $DEG_PATH/UKF/messages/*fetch_error_request_2026-09-24_04* && [[ ! -d $DEG_PATH/UKF/download/UKF_fetch_2026-09-24_04 ]]'
+head -c 30000 /dev/urandom > "$DATA_LAKE_PATH/Data/UKK/00300/UKK_00301/extra.bin"   # UKK_00301 now ~50K, UKK_00150 ~20K
+echo '{"organization":"UKF","requested_ids":["UKK_00301","UKK_00150"]}' > "$DEG_PATH/UKF/requests/request_2026-09-24_07.json"
+FETCH_MAX_CASE_SIZE=25K run "$FETCH" fetch_one_large
+check "one case too large -> skipped"      'jq -e ".too_large_ids == [\"UKK_00301\"] and .included_ids == [\"UKK_00150\"]" $DEG_PATH/UKF/messages/*fetch_ready_request_2026-09-24_07* >/dev/null && [[ -f $DEG_PATH/UKF/download/UKF_fetch_2026-09-24_07/UKK_00150.tar.zst && ! -f $DEG_PATH/UKF/download/UKF_fetch_2026-09-24_07/UKK_00301.tar.zst ]]'
 echo '{"organization":"UKF","requested_ids":["UKK_00301","UKK_00150"]}' > "$DEG_PATH/UKF/requests/request_2026-09-24_05.json"
 DEG_CAPACITY_BYTES=100K DEG_SPACE_MARGIN=1K run "$FETCH" fetch_deg_full
 check "DEG full -> error, nothing built"   'grep -q "Not enough space on the DEG" $DEG_PATH/UKF/messages/*fetch_error_request_2026-09-24_05* && [[ ! -d $DEG_PATH/UKF/download/UKF_fetch_2026-09-24_05 ]]'

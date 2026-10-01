@@ -189,42 +189,33 @@ process_request() {
     finalize_package_log "$status"
   }
 
-  # Step 2: Size checks from the data lake folder sizes, before anything is copied
+  # Step 2: Space checks from the data lake folder sizes, before anything is
+  # copied. The size limits apply to the compressed packages and are checked in
+  # step 3; the uncompressed sizes serve as upper bound for the space checks.
   local max_case_bytes max_total_bytes
   max_case_bytes=$(numfmt --from=iec "${FETCH_MAX_CASE_SIZE}")
   max_total_bytes=$(numfmt --from=iec "${FETCH_MAX_SIZE}")
 
-  local included_ids=() too_large_ids=()
   local total_bytes=0 largest_bytes=0
   declare -A case_bytes
   for exam_id in "${valid_ids[@]}"; do
     local src size
     src="${DATA_PATH}/${exam_id:0:3}/$(get_shard_dir "$exam_id")/${exam_id}"
     size=$(dir_bytes "$src")
-    if [[ "$size" -gt "$max_case_bytes" ]]; then
-      log_warn "Case exceeds per-case limit, skipped: ${exam_id} ($(human "$size") > ${FETCH_MAX_CASE_SIZE})"
-      too_large_ids+=("$exam_id")
-      continue
-    fi
     case_bytes[$exam_id]=$size
-    included_ids+=("$exam_id")
     total_bytes=$((total_bytes + size))
     [[ "$size" -gt "$largest_bytes" ]] && largest_bytes=$size
   done
 
-  local too_large_json
-  too_large_json=$(printf '%s\n' "${too_large_ids[@]}" | grep -v '^$' | jq -R . | jq -sc .)
+  local too_large_ids=()
   local extra_json
-  extra_json=$(jq -nc --argjson skipped "$missing_json" --argjson large "$too_large_json" '{skipped_ids: $skipped, too_large_ids: $large}')
-
-  if [[ ${#included_ids[@]} -eq 0 ]]; then
-    fail_request "All requested cases exceed the per-case limit of ${FETCH_MAX_CASE_SIZE}" "failed_size_limit" "$extra_json"
-    return 1
-  fi
-  if [[ "$total_bytes" -gt "$max_total_bytes" ]]; then
-    fail_request "Request too large: $(human "$total_bytes") exceeds the limit of ${FETCH_MAX_SIZE}. Split it into several requests." "failed_size_limit" "$extra_json"
-    return 1
-  fi
+  # JSON of the ids skipped so far (missing in the lake, above the per-case limit)
+  set_extra_json() {
+    local too_large_json
+    too_large_json=$(printf '%s\n' "${too_large_ids[@]}" | grep -v '^$' | jq -R . | jq -sc .)
+    extra_json=$(jq -nc --argjson skipped "$missing_json" --argjson large "$too_large_json" '{skipped_ids: $skipped, too_large_ids: $large}')
+  }
+  set_extra_json
 
   # DEG free space (see space.sh: real "df" or configured capacity)
   local deg_free margin
@@ -247,28 +238,31 @@ process_request() {
 
   # Acknowledge request
   local ids_json
-  ids_json=$(printf '%s\n' "${included_ids[@]}" | jq -R . | jq -sc .)
+  ids_json=$(printf '%s\n' "${valid_ids[@]}" | jq -R . | jq -sc .)
   write_message "$org" "$(jq -n \
     --arg file "$filename" \
     --argjson ids "$ids_json" \
     --argjson skipped "$missing_json" \
-    --argjson large "$too_large_json" \
     --arg ts "$(now_iso)" \
-    '{type: "fetch", status: "received", request_file: $file, requested_ids: $ids, skipped_ids: $skipped, too_large_ids: $large, timestamp: $ts}')" \
+    '{type: "fetch", status: "received", request_file: $file, requested_ids: $ids, skipped_ids: $skipped, timestamp: $ts}')" \
     "fetch" "received" "${base_name}"
 
-  log_json "\"action\": \"validate_request\", \"file\": \"${filename}\", \"org\": \"${req_org}\", \"ids\": ${ids_json}, \"skipped\": ${missing_json}, \"too_large\": ${too_large_json}, \"total_bytes\": ${total_bytes}, \"result\": \"valid\", \"ack\": \"written\""
+  log_json "\"action\": \"validate_request\", \"file\": \"${filename}\", \"org\": \"${req_org}\", \"ids\": ${ids_json}, \"skipped\": ${missing_json}, \"total_bytes\": ${total_bytes}, \"result\": \"valid\", \"ack\": \"written\""
 
-  # Step 3: One package per case: copy from data lake, archive, checksum, transfer.
-  # Processing case by case keeps local staging usage at about two cases.
+  # Step 3: One package per case: copy from data lake, archive, check the size,
+  # checksum, transfer. Processing case by case keeps local staging usage at
+  # about two cases. A package above FETCH_MAX_CASE_SIZE is skipped, a request
+  # whose packages exceed FETCH_MAX_SIZE in total fails.
   mkdir -p "$staging_dir"
   mkdir -p "$download_dir"
 
+  local included_ids=()
   local manifest_entries=()
+  local compressed_total=0
   local transfer_start
   transfer_start=$(date +%s)
 
-  for exam_id in "${included_ids[@]}"; do
+  for exam_id in "${valid_ids[@]}"; do
     local src archive_name archive_path archive_size
     src="${DATA_PATH}/${exam_id:0:3}/$(get_shard_dir "$exam_id")/${exam_id}"
     archive_name="${exam_id}.tar.zst"
@@ -285,8 +279,23 @@ process_request() {
       return 1
     fi
     rm -rf "${staging_dir:?}/${exam_id}"
-    (cd "$staging_dir" && sha256sum "$archive_name") > "${archive_path}.sha256"
     archive_size=$(stat -c %s "$archive_path")
+
+    if [[ "$archive_size" -gt "$max_case_bytes" ]]; then
+      log_warn "Package exceeds per-case limit, skipped: ${exam_id} ($(human "$archive_size") > ${FETCH_MAX_CASE_SIZE})"
+      log_json "\"action\": \"size_check\", \"file\": \"${archive_name}\", \"result\": \"too_large\", \"archive_bytes\": ${archive_size}"
+      too_large_ids+=("$exam_id")
+      set_extra_json
+      rm -f "$archive_path"
+      continue
+    fi
+    compressed_total=$((compressed_total + archive_size))
+    if [[ "$compressed_total" -gt "$max_total_bytes" ]]; then
+      rm -rf "$download_dir"
+      fail_request "Request too large: the packages exceed the limit of ${FETCH_MAX_SIZE} in total. Split it into several requests." "failed_size_limit" "$extra_json"
+      return 1
+    fi
+    (cd "$staging_dir" && sha256sum "$archive_name") > "${archive_path}.sha256"
 
     if ! rsync -a "$archive_path" "${download_dir}/${archive_name}" || ! cp "${archive_path}.sha256" "${download_dir}/${archive_name}.sha256"; then
       rm -rf "$download_dir"
@@ -303,9 +312,19 @@ process_request() {
       --arg sha "$(awk '{print $1}' "${archive_path}.sha256")" \
       '{id: $id, file: $file, size_bytes: $stored, archive_bytes: $archive, sha256: $sha}')")
     rm -f "$archive_path" "${archive_path}.sha256"
+    included_ids+=("$exam_id")
 
     log_json "\"action\": \"transfer_to_deg\", \"file\": \"${archive_name}\", \"result\": \"success\", \"size_bytes\": ${archive_size}, \"size\": \"$(human "$archive_size")\""
   done
+
+  if [[ ${#included_ids[@]} -eq 0 ]]; then
+    rm -rf "$download_dir"
+    fail_request "All requested cases exceed the per-case limit of ${FETCH_MAX_CASE_SIZE}" "failed_size_limit" "$extra_json"
+    return 1
+  fi
+  ids_json=$(printf '%s\n' "${included_ids[@]}" | jq -R . | jq -sc .)
+  local too_large_json
+  too_large_json=$(jq -c '.too_large_ids' <<< "$extra_json")
 
   local transfer_duration=$(( $(date +%s) - transfer_start ))
   local manifest_json
@@ -321,7 +340,7 @@ process_request() {
     > "${download_dir}/manifest.json"
   rm -rf "$staging_dir"
 
-  log_json "\"action\": \"assemble_package\", \"package\": \"${package_name}\", \"result\": \"success\", \"cases\": ${#included_ids[@]}, \"total_bytes\": ${total_bytes}, \"duration_s\": ${transfer_duration}"
+  log_json "\"action\": \"assemble_package\", \"package\": \"${package_name}\", \"result\": \"success\", \"cases\": ${#included_ids[@]}, \"total_bytes\": ${total_bytes}, \"compressed_bytes\": ${compressed_total}, \"duration_s\": ${transfer_duration}"
 
   # Step 4: Notify partner and archive request
   write_message "$org" "$(jq -n \

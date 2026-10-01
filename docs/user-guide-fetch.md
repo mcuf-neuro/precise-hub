@@ -122,6 +122,6 @@ Upload results are reported in the same folder with `type: "upload"`:
 
 - **Download expiry:** Packages in `download/` are automatically deleted after 48 hours. Download promptly after receiving a "ready" notification.
 - **Failed requests:** A request that could not be fulfilled is moved to `archived-requests/` with a `FAILED` marker in its name, together with an error message in `messages/`. To retry, submit a new request file.
-- **Size limits:** A single examination larger than 4 GB cannot be transferred through the DEG and is skipped (listed in `too_large_ids`). A request whose examinations exceed 20 GB in total is rejected; split it into several requests. If the DEG is out of space, the request is rejected with an error message; download and delete your existing packages, then resubmit.
+- **Size limits:** The limits apply to the compressed packages (`.tar.zst`). A single package larger than 15 GB is skipped (listed in `too_large_ids` of the "ready" message). A request whose packages exceed 20 GB in total is rejected; split it into several requests. If the DEG is out of space, the request is rejected with an error message; download and delete your existing packages, then resubmit.
 - **One request per file:** Each JSON file should contain one request. For multiple independent requests, create separate files (`request_2026-04-16_00.json`, `request_2026-04-16_01.json`, …).
 - **Examination IDs:** IDs follow the format `ORG_NNNNN` (3-letter org code + underscore + 5-digit number). You need to know the exact IDs you want to request.
