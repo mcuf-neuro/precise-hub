@@ -159,6 +159,8 @@ check "rebuild finds injected case"        '[[ $(jq ".case_count" $IDX) -eq 12 ]
 check "rebuild keeps added_at"             '[[ "$(jq -r ".cases[] | select(.id==\"UKF_00042\") | .added_at" $IDX)" == "$added" ]]'
 check "index overview per org"             'jq -e "(.by_org | length) == 7 and (.by_org[0].org == \"FAU\") and ([.by_org[].case_count] | add) == .case_count and (.by_org[] | select(.org==\"UKK\") | .case_count >= 1 and .added_last_30d >= 1) and (.by_org[] | select(.org==\"FAU\") | .case_count == 0)" $IDX >/dev/null'
 check "overview page published"            'grep -q "PRECISE Data Lake Overview" $DEG_PATH/UKF/overview.html && grep -q "<td>UKK</td>" $DEG_PATH/UKK/overview.html && ! grep -q "<td>FAU</td>" $DEG_PATH/UKK/overview.html'
+gen=$(jq -r .generated $DEG_PATH/UKK/index.json); "$REBUILD" > "$T/rebuild1.log" 2>&1
+check "unchanged rebuild not republished"  '[[ "$(jq -r .generated $DEG_PATH/UKK/index.json)" == "$gen" ]] && grep -q "Index unchanged" $T/rebuild1.log'
 rm -f "$IDX"; "$REBUILD" --no-publish > "$T/rebuild2.log" 2>&1
 check "rebuild without index uses logs"    '[[ $(jq ".case_count" $IDX) -eq 12 ]] && [[ "$(jq -r ".cases[] | select(.id==\"UKF_00042\") | .added_at + \" \" + .source + \" \" + .package" $IDX)" == "$added deg UKF_2026-09-24_00.tar.zst" ]]'
 check "rebuild republished"                '[[ $(jq ".case_count" $DEG_PATH/UKK/index.json) -eq 12 ]]'

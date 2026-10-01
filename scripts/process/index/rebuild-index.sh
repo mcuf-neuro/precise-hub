@@ -2,12 +2,15 @@
 # =============================================================================
 # PRECISE Hub - Rebuild the data index from the data lake content
 #
-# Usage: rebuild-index.sh [--no-publish]
+# Usage: rebuild-index.sh [--no-publish] [--recount]
 # Walks Data/ORG/SHARD/ORG_NNNNN. added_at/source/package come, in this order,
 # from the index (cases it already knows), from the package logs in LOG_PATH
 # (cases the deploy loop stored) or from the folder mtime with source "unknown"
-# (e.g. injected directly from local mass storage). Run by hand after direct
-# injections, or nightly via a systemd timer.
+# (e.g. injected directly from local mass storage). Cases are immutable once
+# stored, so size and file count are only measured for cases the index does not
+# know (--recount: measure all). The index is only rewritten and republished if
+# something changed. Run by hand after direct injections, or nightly via a
+# systemd timer.
 # =============================================================================
 set -euo pipefail
 
@@ -21,7 +24,14 @@ source "${PROCESS_DIR}/messages.sh"
 source "${PROCESS_DIR}/index.sh"
 
 PUBLISH=1
-[[ "${1:-}" == "--no-publish" ]] && PUBLISH=0
+RECOUNT=0
+for arg in "$@"; do
+  case "$arg" in
+    --no-publish) PUBLISH=0 ;;
+    --recount) RECOUNT=1 ;;
+    *) echo "Usage: $0 [--no-publish] [--recount]" >&2; exit 2 ;;
+  esac
+done
 
 log_info "Rebuilding data index from ${DATA_PATH}"
 
@@ -59,27 +69,50 @@ fi
 entries_file=$(mktemp)
 trap 'rm -f "$entries_file"' EXIT
 count=0
+measured=0
+
+# One lookup table instead of one jq call per case
+declare -A k_added k_source k_package k_entry
+while IFS=$'\t' read -r id added_at source package entry; do
+  k_added[$id]=$added_at; k_source[$id]=$source; k_package[$id]=$package; k_entry[$id]=$entry
+done < <(jq -r 'to_entries[] | [.key, .value.added_at, .value.source, .value.package,
+  (if .value.size_bytes != null then (.value | tojson) else "" end)] | @tsv' <<< "$known")
 
 shopt -s nullglob
 for case_dir in "${DATA_PATH}"/*/*/*/; do
   case_dir="${case_dir%/}"
   id=$(basename "$case_dir")
   [[ "$id" =~ ^[A-Z]{3}_[0-9]{5}$ ]] || continue
+  count=$((count + 1))
 
-  added_at=$(echo "$known" | jq -r --arg id "$id" '.[$id].added_at // empty')
-  source=$(echo "$known" | jq -r --arg id "$id" '.[$id].source // "unknown"')
-  package=$(echo "$known" | jq -r --arg id "$id" '.[$id].package // "unknown"')
+  # Known from the index with size and file count: reuse the entry as is
+  if [[ $RECOUNT -eq 0 && -n "${k_entry[$id]:-}" ]]; then
+    echo "${k_entry[$id]}" >> "$entries_file"
+    continue
+  fi
+
+  added_at="${k_added[$id]:-}"
+  source="${k_source[$id]:-unknown}"
+  package="${k_package[$id]:-unknown}"
   if [[ -z "$added_at" ]]; then
     added_at=$(date -u -d "@$(stat -c %Y "$case_dir")" +"%Y-%m-%dT%H:%M:%SZ")
   fi
 
   index_entry_from_folder "$case_dir" "$id" "$source" "$package" "$added_at" >> "$entries_file"
-  count=$((count + 1))
+  measured=$((measured + 1))
 done
 shopt -u nullglob
 
+# Rewrite only if the set of cases or any entry changed
+if [[ -s "${INDEX_FILE}" ]] && jq -e --slurpfile idx "${INDEX_FILE}" \
+     '(sort_by(.id) | map(del(.updated_at))) == ($idx[0].cases | sort_by(.id) | map(del(.updated_at)))' \
+     <(jq -sc . "$entries_file") >/dev/null; then
+  log_info "Index unchanged: ${count} cases (${measured} measured)"
+  exit 0
+fi
+
 index_replace "$(jq -sc . "$entries_file")"
-log_info "Index rebuilt: ${count} cases"
+log_info "Index rebuilt: ${count} cases (${measured} measured)"
 
 if [[ $PUBLISH -eq 1 ]]; then
   index_publish
