@@ -4,7 +4,7 @@
 # =============================================================================
 
 # Organization codes (3-letter uppercase)
-ORGANIZATIONS="UKK MUV UKF UHD MUI UKE FAU"
+ORGANIZATIONS="BCN LMU UKK MUV UKF UHD MUI UKE FAU"
 
 # Mount points (override via environment for testing, e.g. DEG_PATH=/tmp/deg)
 DEG_PATH="${DEG_PATH:-/mnt/deg}"
@@ -43,7 +43,7 @@ MISSING_CHECKSUM_TIMEOUT_MINUTES=60
 # Fetch settings
 FETCH_LOOP_INTERVAL=30     # How often to check for new fetch requests (seconds)
 # Size limits apply to the compressed packages (.tar.zst) as transferred via the DEG
-FETCH_MAX_SIZE="${FETCH_MAX_SIZE:-20G}"       # Maximum total size of the packages of one fetch request
+FETCH_MAX_SIZE="${FETCH_MAX_SIZE:-250G}"       # Maximum total size of the packages of one fetch request
 FETCH_MAX_CASE_SIZE="${FETCH_MAX_CASE_SIZE:-15G}"  # Maximum size of a single case package; larger cases are skipped
 
 # DEG cleanup (scripts/process/cleanup/cleanup-deg.sh, run from the fetch loop)
